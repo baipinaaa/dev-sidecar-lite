@@ -16,7 +16,7 @@ Node 实现，不重写。
 | --- | --- | --- |
 | 0 | workspace、7 个 crate 骨架、配置映射、CI | ✅ |
 | 1 | 纯隧道代理 + MITM 证书 + 控制口 IPC | ✅ 待编译 |
-| 2 | DoH/DoT + SVCB/ECH + 指纹路线决策 | ✅ 待编译 |
+| 2 | DoH/DoT + SVCB/ECH + 指纹路线决策 | ✅ 已编译并实测 |
 | 3 | 规则引擎 + IP 评分 + PAC | ✅ 待编译 |
 | 4 | Tauri UI 九页面 + 托盘 + sidecar | ✅ 前端完成 |
 | 5 | 引擎切换、旧版迁移、基准、发版 | ✅ 待实测 |
@@ -84,7 +84,9 @@ cd app; npm run tauri:dev
 - 未编译验证（见上文状态表）。
 - `hudsucker` 未采用，MITM 是手写的（`crates/ds-proxy/src/mitm.rs`），覆盖面比成熟库窄：
   目前只处理 HTTP/1.1，HTTP/2 上游会退化为直连隧道。
-- 指纹伪装（JA3/JA4 与 Chrome 一致）**尚未实现**，路线见 [`docs/FINGERPRINT.md`](docs/FINGERPRINT.md)。
+- 指纹伪装（JA3/JA4 与 Chrome 一致）**尚未实现**：rustls 通道的 JA3 已在 CI 实测为
+  `5b81f3846b1faddcc37be70ed494c956`，与 Chrome 在 GREASE / X25519 / ALPN h2 / 套件集等
+  七个维度全不同，所以**会做 TLS 指纹比对的站点必须走 BoringSSL 通道**。详见 [`docs/FINGERPRINT.md`](docs/FINGERPRINT.md)。
 - 性能数据只测了 Node 侧基线，Rust 侧待填，见 [`docs/BENCHMARK.md`](docs/BENCHMARK.md)。
 
 ## 致谢
