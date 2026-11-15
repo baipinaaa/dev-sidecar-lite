@@ -5,6 +5,15 @@ name: fingerprint
 # 为什么要放 CI：本机没有 Rust 工具链，这个实验必须先有可运行的 ds-proxy。
 # 手动触发即可，不会每天刷 Actions 额度。
 on:
+  # 临时触发器：把改动推到 fingerprint-experiment 分支即自动跑一次，
+  # 结果直接贴到 issue #1（artifact 下载需要 token，issue 评论不需要）。
+  push:
+    branches: [fingerprint-experiment]
+    paths:
+      - '.github/workflows/fingerprint.yml'
+      - 'tests/e2e/fingerprint_compare.ps1'
+      - 'crates/**'
+      - 'Cargo.toml'
   workflow_dispatch:
     inputs:
       compare:
@@ -16,6 +25,7 @@ on:
 
 permissions:
   contents: read
+  issues: write
 
 jobs:
   fingerprint:
@@ -107,3 +117,24 @@ jobs:
             ${{ runner.temp }}/fingerprint.md
             ${{ runner.temp }}/proxy.err
           retention-days: 30
+
+      - name: 结果贴到 issue #1
+        if: always()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $file = Join-Path $env:RUNNER_TEMP 'fingerprint.md'
+          if (-not (Test-Path $file)) {
+            "指纹采集没有产出结果（脚本提前退出）。" | Out-File -FilePath $file -Encoding utf8
+          }
+          $head = @"
+          ### 指纹实验（自动）
+
+          run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          commit: ``${{ github.sha }}``
+
+          "@
+          $body = $head + "`n" + (Get-Content $file -Raw)
+          $body | Out-File -FilePath (Join-Path $env:RUNNER_TEMP 'comment.md') -Encoding utf8
+          gh issue comment 1 --repo ${{ github.repository }} --body-file (Join-Path $env:RUNNER_TEMP 'comment.md')
