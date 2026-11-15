@@ -87,7 +87,8 @@ mod tests {
             &Rejections::new(),
         );
         assert_eq!(selection.ordered, vec![ip(1), ip(2)]);
-        assert_eq!(selection.filtered, 0);
+        // 传了 3 个地址，其中 1 个是重复项，被去重丢弃 → filtered = 1
+        assert_eq!(selection.filtered, 1);
         assert!(selection.route_blocked.is_none());
     }
 

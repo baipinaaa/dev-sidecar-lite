@@ -5,7 +5,7 @@
 
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 
 pub const TYPE_A: u16 = 1;
 pub const TYPE_AAAA: u16 = 28;

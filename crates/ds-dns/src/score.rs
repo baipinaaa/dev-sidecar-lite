@@ -26,6 +26,7 @@ pub const SCORE_PRUNE_TO: usize = SCORE_CAP * 3 / 4;
 
 /// 单个地址的评分记录。
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct IpScore {
     /// 指数平滑后的延迟（毫秒）；`None` 表示从未成功。
     pub ewma_ms: Option<f64>,
@@ -34,16 +35,6 @@ pub struct IpScore {
     pub last_seen: Option<Instant>,
 }
 
-impl Default for IpScore {
-    fn default() -> Self {
-        Self {
-            ewma_ms: None,
-            successes: 0,
-            failures: 0,
-            last_seen: None,
-        }
-    }
-}
 
 impl IpScore {
     pub fn fail_rate(&self) -> f64 {

@@ -71,15 +71,17 @@ mod integration {
 
     #[test]
     fn response_rewrite_removes_alt_svc_for_ech_domain() {
-        let mut options = ds_types::config::InterceptOptions::default();
-        options.response_replace = Some(ds_types::config::ReplaceRules {
+        let options = ds_types::config::InterceptOptions {
+            response_replace: Some(ds_types::config::ReplaceRules {
             headers: Some(
                 [("alt-svc".to_string(), serde_json::json!("[remove]"))]
                     .into_iter()
                     .collect(),
             ),
             ..Default::default()
-        });
+            }),
+            ..Default::default()
+        };
 
         let mut headers = vec![
             ("alt-svc".to_string(), "h3=\":443\"".to_string()),

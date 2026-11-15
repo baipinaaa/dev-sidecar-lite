@@ -262,6 +262,7 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for PrefixedStream<T> {
 }
 
 /// 供测试：读空数据时应立即返回 0（避免阻塞）。
+#[allow(dead_code)]
 pub async fn drain_until_eof<S: AsyncRead + Unpin>(stream: &mut S) -> io::Result<Vec<u8>> {
     let mut out = Vec::new();
     stream.read_to_end(&mut out).await?;

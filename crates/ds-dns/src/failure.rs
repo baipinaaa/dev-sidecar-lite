@@ -111,19 +111,21 @@ pub fn classify(message: &str) -> FailureReason {
 
     let has = |needle: &str| text.contains(needle);
 
-    if has("timed out") || has("timeout") || has("超时") {
+    // 注意：`connect ETIMEDOUT host:port` 里没有空格，"timed out" 匹配不到，
+    // 所以要把 libuv/Node 的错误码写法一并认掉。
+    if has("timed out") || has("timeout") || has("etimedout") || has("超时") {
         if has("tls") || has("handshake") || has("握手") {
             return FailureReason::TlsTimeout;
         }
         return FailureReason::TcpTimeout;
     }
-    if has("connection refused") || has("拒绝") {
+    if has("connection refused") || has("econnrefused") || has("拒绝") {
         return FailureReason::TcpRefused;
     }
-    if has("unreachable") || has("no route") {
+    if has("unreachable") || has("no route") || has("ehostunreach") || has("enetunreach") {
         return FailureReason::TcpUnreachable;
     }
-    if has("reset by peer") || has("connection reset") || has("被重置") {
+    if has("reset by peer") || has("connection reset") || has("econnreset") || has("被重置") {
         return FailureReason::TlsReset;
     }
     if has("certificate") || has("cert") || has("证书") {
