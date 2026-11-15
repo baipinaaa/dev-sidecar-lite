@@ -141,8 +141,12 @@ mod tests {
 
     fn state_with_one_conn() -> ControlState {
         let state = ControlState::new();
-        let handle = state.registry.register("example.com", 443, ConnKind::Tunnel);
-        handle.finish(1, 2);
+        {
+            // 用块把 ConnHandle 的作用域收窄：它借用了 state.registry，
+            // 不结束借用就没法把 state 移出去（E0505）。
+            let mut handle = state.registry.register("example.com", 443, ConnKind::Tunnel);
+            handle.finish(1, 2);
+        }
         state
     }
 

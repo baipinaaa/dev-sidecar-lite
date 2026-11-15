@@ -237,7 +237,7 @@ mod tests {
     #[test]
     fn register_list_and_finish() {
         let registry = Registry::new();
-        let handle = registry.register("example.com", 443, ConnKind::Tunnel);
+        let mut handle = registry.register("example.com", 443, ConnKind::Tunnel);
         let id = handle.id();
 
         let list = registry.list();

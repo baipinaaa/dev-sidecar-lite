@@ -94,9 +94,14 @@ jobs:
         shell: bash
         run: |
           set +e
-          cargo check --workspace --all-targets --message-format=short > errors.txt 2>&1
-          echo "exit=$?" >> errors.txt
-          tail -n 400 errors.txt
+          # --color never：issue 里不需要 ANSI；errors 优先保留（tail 而不是 head），
+          # 因为 cargo 把真正的报错放在最后。
+          cargo check --workspace --all-targets --message-format=short --color never > raw.txt 2>&1
+          echo "exit=$?" >> raw.txt
+          grep -E "error|^warning: unused|-->" raw.txt > errors.txt || true
+          echo "=== 上下文（最后 60 行）===" >> errors.txt
+          tail -n 60 raw.txt >> errors.txt
+          tail -n 60 errors.txt
 
       - name: 提交到 issue
         shell: bash
