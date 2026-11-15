@@ -46,6 +46,12 @@ jobs:
       - name: 构建 ds-proxy
         run: cargo build --release -p ds-proxy
 
+      - name: 生成自签 CA（MITM 需要）
+        shell: pwsh
+        run: |
+          cargo run --release -p ds-tls --bin ds-ca
+          Get-ChildItem "$env:USERPROFILE\.dev-sidecar" | Select-Object Name, Length | Format-Table | Out-String | Write-Host
+
       - name: 准备最小 running.json
         shell: pwsh
         run: |
@@ -54,7 +60,10 @@ jobs:
             host = '127.0.0.1'
             port = 31182
             enabled = $true
-            intercepts = @{}
+            intercepts = @{
+              'tls.peet.ws' = @{ '.*' = @{} }
+              'tls.browserleaks.com' = @{ '.*' = @{} }
+            }
             preSetIpList = @{}
             whiteList = @{}
             dynamicUpstreams = @{}

@@ -14,7 +14,7 @@ param(
     [string]$OutFile = ''
 )
 
-$ErrorActionPreference = 'Stop'
+$ErrorActionPreference = 'Continue'
 $ProgressPreference = 'SilentlyContinue'
 
 $ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36'
@@ -25,7 +25,7 @@ $code = 0
 $body = ''
 $attempts = 3
 for ($i = 1; $i -le $attempts; $i++) {
-    $raw = & curl.exe -s --proxy $ProxyUrl --ssl-no-revoke --max-time 30 -A $ua -w "`n%{http_code}" $Url 2>&1
+    $raw = & curl.exe -s -k --proxy $ProxyUrl --ssl-no-revoke --max-time 30 -A $ua -w "`n%{http_code}" $Url 2>&1
     $text = "$raw"
     $parts = $text -split "`n"
     $last = "$($parts[-1])".Trim()
@@ -37,7 +37,7 @@ for ($i = 1; $i -le $attempts; $i++) {
         $body = $text
     }
     if ($code -ge 200 -and $code -lt 300) { break }
-    Write-Host "第 $i 次尝试失败：HTTP $code" -ForegroundColor Yellow
+    Write-Host "第 $i 次尝试失败：HTTP $code（curl exit=$LASTEXITCODE）" -ForegroundColor Yellow
     if ($i -lt $attempts) { Start-Sleep -Seconds 5 }
 }
 
