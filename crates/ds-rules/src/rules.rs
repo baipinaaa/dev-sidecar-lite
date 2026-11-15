@@ -259,10 +259,12 @@ mod tests {
     }
 
     #[test]
-    fn glob_covers_root_and_subdomains() {
+    fn glob_covers_subdomains_only() {
+        // 与 Node 版 `matchHostname` 保持一致：`*.x.com` 只匹配子域，根域需要单独写一条 `x.com`。
+        // PAC 层另有处理（通配符同时覆盖根域，见 ds-pac 的 to_pac_regex），两处分工不同。
         let rules = Rules::from_config(&config());
-        assert!(rules.should_intercept("huggingface.co"));
         assert!(rules.should_intercept("cdn.huggingface.co"));
+        assert!(!rules.should_intercept("huggingface.co"));
     }
 
     #[test]

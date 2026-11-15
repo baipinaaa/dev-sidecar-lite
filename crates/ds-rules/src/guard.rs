@@ -116,6 +116,8 @@ mod tests {
 
     #[test]
     fn private_hosts_bypass() {
+        // 用空配置排除白名单/排除名单的干扰，专测内网判定
+        let cfg = RuntimeConfig::from_json_str("{}").expect("parse");
         for host in [
             "localhost",
             "127.0.0.1",
@@ -128,11 +130,20 @@ mod tests {
             "[::1]",
         ] {
             assert_eq!(
-                bypass_reason(&config(), host),
+                bypass_reason(&cfg, host),
                 Some(BypassReason::Private),
                 "{host} 应判为内网"
             );
         }
+    }
+
+    #[test]
+    fn white_list_wins_over_private() {
+        // 判定顺序：白名单 → 排除名单 → 内网；localhost 同时在白名单里
+        assert_eq!(
+            bypass_reason(&config(), "localhost"),
+            Some(BypassReason::WhiteList)
+        );
     }
 
     #[test]
