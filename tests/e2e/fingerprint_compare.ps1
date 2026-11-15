@@ -76,11 +76,11 @@ function Verdict {
 }
 
 $rows = @(
-    [pscustomobject]@{ 项目 = 'JA3'; 实测 = $ja3; Chrome 参考 = $chromeRef.Ja3; 判定 = (Verdict $ja3 $chromeRef.Ja3) }
-    [pscustomobject]@{ 项目 = 'JA4'; 实测 = $ja4; Chrome 参考 = $chromeRef.Ja4; 判定 = (Verdict $ja4 $chromeRef.Ja4) }
-    [pscustomobject]@{ 项目 = 'Akamai h2'; 实测 = $akamai; Chrome 参考 = $chromeRef.AkamaiHash; 判定 = (Verdict $akamai $chromeRef.AkamaiHash) }
-    [pscustomobject]@{ 项目 = 'TLS 版本'; 实测 = $tlsVersion; Chrome 参考 = '772 (1.3)'; 判定 = '-' }
-    [pscustomobject]@{ 项目 = '套件'; 实测 = $cipher; Chrome 参考 = '4865 (TLS_AES_128_GCM_SHA256)'; 判定 = '-' }
+    [pscustomobject]@{ Item = 'JA3'; Mine = $ja3; Chrome = $chromeRef.Ja3; Verdict = (Verdict $ja3 $chromeRef.Ja3) }
+    [pscustomobject]@{ Item = 'JA4'; Mine = $ja4; Chrome = $chromeRef.Ja4; Verdict = (Verdict $ja4 $chromeRef.Ja4) }
+    [pscustomobject]@{ Item = 'Akamai h2'; Mine = $akamai; Chrome = $chromeRef.AkamaiHash; Verdict = (Verdict $akamai $chromeRef.AkamaiHash) }
+    [pscustomobject]@{ Item = 'TLS version'; Mine = $tlsVersion; Chrome = '772 (1.3)'; Verdict = '-' }
+    [pscustomobject]@{ Item = 'Cipher'; Mine = $cipher; Chrome = '4865 (TLS_AES_128_GCM_SHA256)'; Verdict = '-' }
 )
 
 $rows | Format-Table -AutoSize | Out-String | Write-Host
@@ -94,7 +94,7 @@ $md += ''
 $md += '| 项目 | 实测 | Chrome 参考 | 判定 |'
 $md += '| --- | --- | --- | --- |'
 foreach ($row in $rows) {
-    $md += "| $($row.项目) | ``$($row.实测)`` | ``$($row.'Chrome 参考')`` | $($row.判定) |"
+    $md += "| $($row.Item) | ``$($row.Mine)`` | ``$($row.Chrome)`` | $($row.Verdict) |"
 }
 $md += ''
 $md += "JA3 原文：``$ja3Text``"
