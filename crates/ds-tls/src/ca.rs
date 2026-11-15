@@ -126,6 +126,14 @@ impl DynamicResolver {
     }
 }
 
+// rustls 0.23 要求 `ResolvesServerCert: Debug + Send + Sync`。
+// CertAuthority 里握着 KeyPair 与证书缓存，没必要把私钥相关状态打印出去，手写一个最小实现。
+impl std::fmt::Debug for DynamicResolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DynamicResolver").finish_non_exhaustive()
+    }
+}
+
 impl ResolvesServerCert for DynamicResolver {
     fn resolve(&self, client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
         let Some(name) = client_hello.server_name() else {

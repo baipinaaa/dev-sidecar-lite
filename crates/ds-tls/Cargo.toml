@@ -15,5 +15,4 @@ rustls-pki-types.workspace = true
 rustls-native-certs.workspace = true
 rcgen.workspace = true
 anyhow.workspace = true
-thiserror.workspace = true
 tracing.workspace = true
