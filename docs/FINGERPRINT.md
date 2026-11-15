@@ -46,23 +46,71 @@
    - BoringSSL + ECH：取决于 `boring` 版本是否暴露 `SSL_set1_ech_config_list`，属于实验项
    - 若无法组合，则按站点重要性取舍：CF 严格站优先"指纹"，无挑战的站优先"ECH"
 
-## 实验计划（需在有 Rust 环境时执行）
+## 实验执行方式（已跑通，无需本机 Rust）
+
+指纹不能自己算——ClientHello 的形态要在**对端眼里**才是有效的。做法是让流量经过被测引擎，
+访问会回显握手细节的服务，让它把看到的东西原样吐回来：
 
 ```powershell
-# 1. 采集 Chrome 真实指纹（本机 Chromium 访问任意 https 站，用 Wireshark 抓 ClientHello）
-# 2. 采集 rustls 指纹
-cargo run -p ds-dns --example ech_check -- linux.do
-# 3. 计算 JA3/JA4 并对比（脚本：tests/e2e/ja3_from_pcap.py）
-python tests/e2e/ja3_from_pcap.py chrome.pcapng
-python tests/e2e/ja3_from_pcap.py rustls.pcapng
+# CI 里自动化，见 .github/workflows/fingerprint.yml
+pwsh -File tests/e2e/fingerprint_compare.ps1 -Label rust -ProxyUrl http://127.0.0.1:31182
 ```
 
-判定标准（写入验收）：
-- JA3 完全一致 → 视为通过（Chrome 复刻成功）
-- JA4 前缀一致（`t13d1516h2_` 等）→ 视为"可接受"
+链路：`curl -k -x http://127.0.0.1:31182 https://tls.peet.ws/api/all`
+→ 本地 ds-proxy 以 `tls.peet.ws` 命中 `intercepts` 做 MITM
+→ **ds-proxy 用自己的 rustls 栈向 tls.peet.ws 建连** → 对端解析我们的 ClientHello 并回显。
+
+注意两点（都踩过）：
+- 代理必须与采集**在同一个 CI step 内**起停。跨 step 时 runner 会收掉 `Start-Process` 起的进程，
+  表现为「端口刚就绪就 curl exit=7」。
+- `intercepts` 必须包含被测域名，否则走纯隧道，测到的是 curl 的指纹而不是我们的。
+
+## 实测数据（2026-11-15，CI windows-latest，rustls 0.23 + ring）
+
+| 项目 | 值 |
+| --- | --- |
+| JA3 | `771,4866-4865-49196-49195-49200-49199-49188-49187-49192-49191,0-43-13-35-10-11-16-51-49-23-65281-45,24-23,0` |
+| JA3 hash | `5b81f3846b1faddcc37be70ed494c956` |
+| JA4 | `t13d1012h1_01be160bb49b_36bf25f296df` |
+| peetprint hash | `d79a704d5317598173b9ac3f18c1ac3b` |
+| 协商版本 | record 771 / negotiated 772（TLS 1.3） |
+| 套件 | `TLS_AES_256_GCM_SHA384`、`TLS_AES_128_GCM_SHA256`、`ECDHE_{ECDSA,RSA}_WITH_AES_{256,128}_GCM_SHA384/256`、`..._CBC_SHA384/256` |
+| supported_groups | **仅 `P-384 (24)`、`P-256 (23)`** |
+| 扩展顺序 | `0 (SNI), 43, 13, 35, 10, 11, 16, 51, 49, 23, 65281, 45` |
+| ALPN | **仅 `http/1.1`** |
+| GREASE | **无** |
+
+## 与 Chrome 的结构性差异（不需要参考 hash 也能判定）
+
+| 维度 | Chrome 149 | 我们（rustls 默认） | 影响 |
+| --- | --- | --- | --- |
+| GREASE | 每个列表都插入 0x?a?a | 无 | JA3/JA4 立刻暴露「非浏览器」 |
+| 密钥交换 | X25519 首选 + P-256 | **只有 P-384/P-256，无 X25519** | 握手更慢，且列表顺序不符 |
+| ALPN | `h2, http/1.1` | 只有 `http/1.1` | h2 指纹（Akamai）全丢，站点可能降级 |
+| 套件 | 含 CHACHA20(52393/52392)、AES-128-CCM、3DES | 无 CHACHA20/CCM | 列表长度与顺序全不同 |
+| 扩展 | 含 `5 (status_request)`、`27 (compress_certificate)`、`17513`(ALPS)、`51` 带 X25519 key_share | 缺 status_request/ALPS/compress_certificate | CF Bot Management 直接判非 Chrome |
+| 会话票 | 无 ticket 扩展以外的 PSK | 有 `35 session_ticket` + `45 psk_key_exchange_modes` | 差异明显 |
+| renegotiation_info | 有（BoringSSL） | 有 | 一致 |
+
+**结论：rustls 的 ClientHello 与 Chrome 在七个维度上全部不同，`5b81f38…` 与任何 Chrome 版本的 JA3 都对不上。**
+这不是"调参能修"的差距——rustls 不提供 GREASE、扩展顺序、ALPN 与 key_share 选择的控制面。
+
+## 判定（按事先写好的标准）
+
+- JA3 完全一致 → 通过：**未通过**
+- JA4 前缀一致（Chrome 是 `t13d1516h2_…`，我们是 `t13d1012h1_…`）→ 可接受：**未通过**
+  （`h1` 说明无 h2，`1012` 的套件/扩展计数也完全不同）
 - 均不一致 → 该站点必须走 BoringSSL 通道
+
+→ **凡是会做 TLS 指纹比对的站点（Cloudflare Bot Management、Akamai、DataDome 等），
+rustls 通道无法通过；这类站点必须走 BoringSSL（`wreq`/`boring`）通道。**
 
 ## 当前状态
 
-- rustls + ECH：**已实现**（`crates/ds-tls/src/ech.rs`）
-- BoringSSL 通道：**未实现**，等待步骤 12 的 CF 验收结果决定是否值得引入
+- rustls + ECH：**已实现并通过编译/单测**（`crates/ds-tls/src/ech.rs`）
+- rustls 指纹实测：**已完成**（上表，数据来自 CI run 43720759709）
+- BoringSSL 通道：**未实现**。`wreq-js` 的 `.d.ts` 只有 `enableEchGrease`（假 ECH），
+  所以 BoringSSL 通道要单独用自己的 `boring` 依赖 + `SSL_set1_ech_config_list` 实验，
+  或接受「指纹站不用 ECH、ECH 站不伪装指纹」的二选一（见 `## 决策` 第 3 条）。
+- 待补：本机 Chromium 149 的实测 JA3 hash（用 `tests/e2e/ja3_from_pcap.py` 抓包算），
+  用于把上表的"结构性差异"升级成"逐 hash 对比"。

@@ -25,8 +25,10 @@ $code = 0
 $body = ''
 $attempts = 3
 for ($i = 1; $i -le $attempts; $i++) {
-    $raw = & curl.exe -s -k --proxy $ProxyUrl --ssl-no-revoke --max-time 30 -A $ua -w "`n%{http_code}" $Url 2>&1
-    $text = "$raw"
+    # 注意：PowerShell 把数组转字符串是**空格拼接**，多行 JSON 会被压成一行，
+    # 必须显式 -join "`n"，否则 $parts[-1] 取不到末尾的 %{http_code}（早期版本因此一直判 HTTP 0）。
+    $raw = @(& curl.exe -s -k --proxy $ProxyUrl --ssl-no-revoke --max-time 30 -A $ua -w "`n%{http_code}" $Url 2>&1)
+    $text = ($raw -join "`n")
     $parts = $text -split "`n"
     $last = "$($parts[-1])".Trim()
     if ($last -match '^[0-9]{3}$') {
