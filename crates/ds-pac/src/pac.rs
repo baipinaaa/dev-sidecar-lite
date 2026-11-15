@@ -65,9 +65,14 @@ pub fn to_pac_regex(pattern: &str) -> Option<String> {
     let mut source = if pattern.starts_with('^') {
         pattern.to_string()
     } else if pattern.contains('*') || pattern.contains('?') {
-        let (prefix, body) = match pattern.strip_prefix("*.") {
-            Some(rest) => ("(.+\\.)?", rest),
-            None => ("", pattern),
+        // `*.x.com` 与 `*x.com` 都当作「根域 + 任意子域」：前缀统一换成 `(.+\.)?`，
+        // 这样正则本身能命中根域（浏览器直接打开 x.com 时才不会被判成直连）。
+        let (prefix, body) = if let Some(rest) = pattern.strip_prefix("*.") {
+            ("(.+\\.)?", rest)
+        } else if let Some(rest) = pattern.strip_prefix('*') {
+            ("(.+\\.)?", rest)
+        } else {
+            ("", pattern)
         };
         let escaped = body
             .replace('.', "\\.")
@@ -79,10 +84,15 @@ pub fn to_pac_regex(pattern: &str) -> Option<String> {
     };
 
     // JScript 不支持命名捕获组与后行断言：降级为普通分组，先保证能编译。
-    source = source
-        .replace("(?<=", "(?:")
-        .replace("(?<!", "(?:")
-        .replace("(?<", "(?:");
+    // 顺序很重要：`(?<=` / `(?<!` 先处理，否则会被命名组规则连名字一起吃掉；
+    // 命名组 `(?<name>` 必须连名字一起去掉，只留 `(?:`。
+    source = source.replace("(?<=", "(?:").replace("(?<!", "(?:");
+    while let Some(idx) = source.find("(?<") {
+        match source[idx..].find('>').map(|offset| idx + offset) {
+            Some(end) => source.replace_range(idx..=end, "(?:"),
+            None => source.replace_range(idx..idx + 3, "(?:"),
+        }
+    }
 
     Some(source)
 }
