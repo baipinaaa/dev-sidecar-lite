@@ -107,8 +107,15 @@ jobs:
       - name: 采集指纹
         shell: pwsh
         run: |
-          pwsh -File tests/e2e/fingerprint_compare.ps1 -Label ${{ github.event.inputs.compare || 'rust' }} `
-            -ProxyUrl http://127.0.0.1:31182 -OutFile "$env:RUNNER_TEMP\fingerprint.md"
+          $log = Join-Path $env:RUNNER_TEMP 'fp.log'
+          try {
+            pwsh -NoProfile -File tests/e2e/fingerprint_compare.ps1 -Label ${{ github.event.inputs.compare || 'rust' }} `
+              -ProxyUrl http://127.0.0.1:31182 -OutFile "$env:RUNNER_TEMP\fingerprint.md" 2>&1 |
+              Tee-Object -FilePath $log
+            "脚本退出码：$LASTEXITCODE" | Add-Content -Path $log
+          } catch {
+            "脚本异常：$_" | Tee-Object -FilePath $log -Append
+          }
 
       - name: 停止代理
         if: always()
@@ -138,7 +145,7 @@ jobs:
             "指纹采集没有产出结果（脚本提前退出）。" | Out-File -FilePath $file -Encoding utf8
           }
           # 把代理自身的输出也贴进评论，省得去下载 artifact
-          foreach ($name in @('proxy.err', 'proxy.out')) {
+          foreach ($name in @('fp.log', 'proxy.err', 'proxy.out')) {
             $diag = Join-Path $env:RUNNER_TEMP $name
             if (Test-Path $diag) {
               Add-Content -Path $file -Value "`n<details><summary>$name（末尾 40 行）</summary>`n"
