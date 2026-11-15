@@ -69,3 +69,55 @@ jobs:
         run: cargo test --workspace --all-targets -- --nocapture
       - name: cargo build (release)
         run: cargo build --workspace --release
+
+  # 失败时把编译器原话落到 issue 里。
+  #
+  # 起因：开发机没有 Rust 工具链，Actions 的日志又必须带 token 才能下载，
+  # 于是「编译报错 → 谁去读」成了死循环。这里用 GITHUB_TOKEN 把
+  # `cargo check --message-format=short` 的输出贴进 issue，公开可读、可 grep。
+  diagnose:
+    name: diagnose
+    runs-on: windows-latest
+    needs: [clippy, test]
+    if: failure()
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+
+      - name: 收集编译错误
+        shell: bash
+        run: |
+          set +e
+          cargo check --workspace --all-targets --message-format=short > errors.txt 2>&1
+          echo "exit=$?" >> errors.txt
+          tail -n 400 errors.txt
+
+      - name: 提交到 issue
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -e
+          TITLE='[ci] 编译错误（自动收集）'
+          {
+            echo "commit: \`$SHA\`"
+            echo "run: $RUN_URL"
+            echo ''
+            echo '```'
+            head -c 55000 errors.txt
+            echo '```'
+          } > body.md
+          existing=$(gh issue list --state open --search "$TITLE in:title" --json number --jq '.[0].number' || true)
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body-file body.md
+          else
+            gh issue create --title "$TITLE" --body-file body.md
+          fi
