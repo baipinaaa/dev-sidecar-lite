@@ -1,0 +1,3 @@
+# externalBin 目标目录。构建前用 scripts/prepare-binaries.ps1 填充：
+#   ds-proxy-x86_64-pc-windows-msvc.exe
+#   ds-core-host-x86_64-pc-windows-msvc.exe

@@ -1,0 +1,100 @@
+name: release
+
+# 打 tag 才构建，且必须人工确认：这个 workflow 会往 GitHub Release 发安装包，
+# 而安装包带 updater 签名，一旦发错版本用户会自动升级到错的构建。
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要发布的 tag（例如 v0.1.0）'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+          components: rustfmt, clippy
+
+      - name: 缓存 cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: '. -> target'
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: 构建 Rust 数据面
+        run: cargo build --release --workspace
+
+      - name: 构建控制面（Node SEA）
+        shell: pwsh
+        run: |
+          cd core-host
+          # core-host 本身零依赖；SEA 只打包入口脚本
+          npm ci --no-audit --no-fund --ignore-scripts 2>$null
+          if ($LASTEXITCODE -ne 0) { Write-Host '无 package-lock，跳过 npm ci（core-host 无依赖）' }
+          npm install --no-save postject
+          node scripts/build-sea.js
+
+      - name: 摆放 sidecar 二进制
+        shell: pwsh
+        run: pwsh -File scripts/prepare-binaries.ps1
+
+      - name: 安装前端依赖
+        working-directory: app
+        run: npm install --no-audit --no-fund
+
+      - name: 构建并发布（NSIS + updater 产物）
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: app
+          tagName: ${{ github.event.inputs.tag || github.ref_name }}
+          releaseName: 'DevSidecar Lite ${{ github.event.inputs.tag || github.ref_name }}'
+          releaseBody: |
+            见 [`docs/MIGRATE-FROM-ELECTRON.md`](docs/MIGRATE-FROM-ELECTRON.md)。
+
+            - 首次安装需要装根证书（开启「系统代理」或「PAC 分流」时会提示）
+            - 从 Electron 版迁移请先卸载旧版，两者会争抢 127.0.0.1:31181
+          releaseDraft: true
+          prerelease: false
+          args: --target x86_64-pc-windows-msvc
+
+      - name: 上传基准测试脚本（便于用户自查）
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-scripts
+          path: |
+            tests/e2e/bench.ps1
+            tests/e2e/smoke.ps1
+            tests/e2e/cf_acceptance.ps1
+          retention-days: 14

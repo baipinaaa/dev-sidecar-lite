@@ -1,0 +1,18 @@
+{
+  "name": "ds-core-host",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DevSidecar Lite 的控制面宿主：把 Node core 的 API 暴露成 HTTP + SSE",
+  "type": "commonjs",
+  "main": "src/main.js",
+  "bin": {
+    "ds-core-host": "src/main.js"
+  },
+  "scripts": {
+    "start": "node src/main.js",
+    "build": "node scripts/build-sea.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

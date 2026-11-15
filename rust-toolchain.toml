@@ -1,0 +1,7 @@
+# 用 CI 与本地保持一致的工具链
+# rust-version 下限见 workspace.package.rust-version
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+targets = ["x86_64-pc-windows-msvc"]
+profile = "minimal"

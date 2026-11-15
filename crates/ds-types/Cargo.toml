@@ -1,0 +1,13 @@
+[package]
+name = "ds-types"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "dev-sidecar-lite 配置类型：running.json 的 serde 映射"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+indexmap.workspace = true
+regex.workspace = true

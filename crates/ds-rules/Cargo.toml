@@ -1,0 +1,16 @@
+[package]
+name = "ds-rules"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "dev-sidecar-lite 规则引擎：intercepts / responseReplace / whiteList / 域名匹配"
+
+[dependencies]
+ds-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+indexmap.workspace = true
+regex.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
