@@ -28,10 +28,17 @@ const ESTABLISHED: &[u8] =
     b"HTTP/1.1 200 Connection Established\r\nProxy-agent: dev-sidecar-lite\r\n\r\n";
 
 /// MITM 运行所需的两套 TLS 配置。
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Mitm {
     acceptor: TlsAcceptor,
     connector: TlsConnector,
+}
+
+// tokio-rustls 的 TlsAcceptor / TlsConnector 没实现 Debug，这里只打印类型名。
+impl std::fmt::Debug for Mitm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Mitm").finish_non_exhaustive()
+    }
 }
 
 impl Mitm {
@@ -72,9 +79,9 @@ pub fn should_intercept(config: &RuntimeConfig, host: &str) -> bool {
         .intercepts
         .keys()
         .any(|pattern| match ds_types::matcher::compile(pattern) {
-            Ok(re) => re.is_match(host),
-            Err(err) => {
-                tracing::debug!("intercepts 规则 {pattern} 无法编译：{err}");
+            Some(re) => re.is_match(host),
+            None => {
+                tracing::debug!("intercepts 规则 {pattern} 为空或非法，已跳过");
                 false
             }
         })
