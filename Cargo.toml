@@ -45,11 +45,14 @@ http-body-util = "0.1"
 # --- TLS ---
 rustls = { version = "0.23", default-features = false, features = [
   "ring",
+  # ECH 需要 HPKE，而 0.23 只有 aws-lc-rs 提供者实现了 HPKE（ring 没有 hpke 模块）。
+  # 两个 provider 可以共存：普通连接用 ring，ECH 连接用 aws-lc-rs。
+  "aws_lc_rs",
   "std",
   "tls12",
   "logging",
 ] }
-tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "aws_lc_rs", "tls12"] }
 rustls-pki-types = "1"
 rcgen = { version = "0.13", features = ["pem", "x509-parser"] }
 rustls-native-certs = "0.8"

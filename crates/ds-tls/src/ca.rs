@@ -101,7 +101,7 @@ impl CertAuthority {
         ];
 
         let cert = params
-            .signed_by(&leaf_key, &self.ca_cert)
+            .signed_by(&leaf_key, &self.ca_cert, &self.ca_key)
             .with_context(|| format!("用 CA 签发 {hostname} 失败"))?;
 
         let chain = vec![cert.der().clone()];
