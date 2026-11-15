@@ -21,15 +21,34 @@ $ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like
 
 Write-Host "=== 指纹采集：$Label（$ProxyUrl）===" -ForegroundColor Cyan
 
-$raw = & curl.exe -s --proxy $ProxyUrl --ssl-no-revoke -A $ua -w "`n%{http_code}" $Url 2>$null
-$parts = "$raw" -split "`n"
-$code = [int]($parts[-1])
-$body = ($parts[0..($parts.Length - 2)] -join "`n")
+$code = 0
+$body = ''
+$attempts = 3
+for ($i = 1; $i -le $attempts; $i++) {
+    $raw = & curl.exe -s --proxy $ProxyUrl --ssl-no-revoke --max-time 30 -A $ua -w "`n%{http_code}" $Url 2>&1
+    $text = "$raw"
+    $parts = $text -split "`n"
+    $last = "$($parts[-1])".Trim()
+    if ($last -match '^[0-9]{3}$') {
+        $code = [int]$last
+        $body = ($parts[0..($parts.Length - 2)] -join "`n")
+    } else {
+        $code = 0
+        $body = $text
+    }
+    if ($code -ge 200 -and $code -lt 300) { break }
+    Write-Host "第 $i 次尝试失败：HTTP $code" -ForegroundColor Yellow
+    if ($i -lt $attempts) { Start-Sleep -Seconds 5 }
+}
 
 if ($code -lt 200 -or $code -ge 300) {
     Write-Host "请求失败：HTTP $code" -ForegroundColor Red
     Write-Host $body
-    exit 1
+    if ($OutFile) {
+        $head = @("# $Label 采集失败", "", "HTTP ``$code``", "", '```', ($body -split "`n" | Select-Object -First 40), '```')
+        ($head -join "`n") | Out-File -FilePath $OutFile -Append -Encoding utf8
+    }
+    exit 2
 }
 
 $json = $body | ConvertFrom-Json

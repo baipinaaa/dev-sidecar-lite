@@ -128,6 +128,15 @@ jobs:
           if (-not (Test-Path $file)) {
             "指纹采集没有产出结果（脚本提前退出）。" | Out-File -FilePath $file -Encoding utf8
           }
+          # 把代理自身的输出也贴进评论，省得去下载 artifact
+          foreach ($name in @('proxy.err', 'proxy.out')) {
+            $diag = Join-Path $env:RUNNER_TEMP $name
+            if (Test-Path $diag) {
+              Add-Content -Path $file -Value "`n<details><summary>$name（末尾 40 行）</summary>`n"
+              Add-Content -Path $file -Value ((Get-Content $diag -Tail 40) -join "`n")
+              Add-Content -Path $file -Value "`n</details>`n"
+            }
+          }
           $head = @"
           ### 指纹实验（自动）
 
