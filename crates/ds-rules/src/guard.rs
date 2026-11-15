@@ -65,16 +65,24 @@ pub fn is_private_host(host: &str) -> bool {
         return true;
     }
 
-    let octets: Vec<u8> = host
-        .split('.')
-        .map(|part| part.parse::<u8>().unwrap_or(0xFF))
-        .collect();
-
-    if octets.len() != 4 || octets.contains(&0xFF) {
+    // 逐段解析成 IPv4；任何一段非法（含空段）就说明不是 IPv4 字面量。
+    // 注意不能用 0xFF 当哨兵值 —— 255 是合法八位组（如 172.31.255.255 是内网）。
+    let mut octets = [0u8; 4];
+    let mut count = 0usize;
+    for part in host.split('.') {
+        match part.parse::<u8>() {
+            Ok(value) if count < 4 => {
+                octets[count] = value;
+                count += 1;
+            }
+            _ => return false,
+        }
+    }
+    if count != 4 {
         return false;
     }
 
-    let [a, b, ..] = [octets[0], octets[1], octets[2], octets[3]];
+    let [a, b, ..] = octets;
     a == 127
         || a == 10
         || (a == 192 && b == 168)
