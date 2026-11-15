@@ -1,12 +1,19 @@
 name: fingerprint
 
-# 指纹对比实验：分别用两个引擎连 tls.peet.ws，读回服务端观测到的 JA3/JA4。
+# 指纹对比实验：让流量经过被测引擎，问服务端「我们看起来像不像 Chrome」。
+#
+# 原理：tls.peet.ws 会把收到的 ClientHello 解析成 JA3/JA4 原样返回。
+# 所以只要 curl 走我们的代理，返回的 JA3 就是「我们这套 TLS 栈的指纹」。
 #
 # 为什么要放 CI：本机没有 Rust 工具链，这个实验必须先有可运行的 ds-proxy。
-# 手动触发即可，不会每天刷 Actions 额度。
+#
+# 踩过的坑（重要，别改回去）：
+# 1. **代理必须和采集在同一个 step 里起停**。上一版把 Start-Process 放一个 step、
+#    采集放下一个 step，结果 step 边界上进程被 runner 收掉了 —— 端口刚检测到就绪，
+#    6 秒后 curl 就 exit=7（connection refused）。
+# 2. 新分支 push 的提交如果已经在默认分支上，`paths` 过滤会认为「无改动」而不触发。
+# 3. artifact 下载需要 token，所以结果直接贴到 issue #1。
 on:
-  # 临时触发器：把改动推到 fingerprint-experiment 分支即自动跑一次，
-  # 结果直接贴到 issue #1（artifact 下载需要 token，issue 评论不需要）。
   push:
     branches: [fingerprint-experiment]
     paths:
@@ -17,11 +24,10 @@ on:
   workflow_dispatch:
     inputs:
       compare:
-        description: '要对比的引擎'
+        description: '标签（写进报告，便于区分多轮实验）'
         required: false
         default: 'rust'
-        type: choice
-        options: [rust, node, both]
+        type: string
 
 permissions:
   contents: read
@@ -31,6 +37,8 @@ jobs:
   fingerprint:
     runs-on: windows-latest
     timeout-minutes: 45
+    env:
+      LABEL: ${{ github.event.inputs.compare || 'rust' }}
 
     steps:
       - uses: actions/checkout@v4
@@ -55,7 +63,7 @@ jobs:
       - name: 准备最小 running.json
         shell: pwsh
         run: |
-          # 只保留指纹实验需要的字段：监听端口 + 空规则（全部直连转发）
+          # 只保留实验需要的字段：监听端口 + 两个用来测指纹的域名
           $config = @{
             host = '127.0.0.1'
             port = 31182
@@ -88,49 +96,51 @@ jobs:
           $config | ConvertTo-Json -Depth 10 | Set-Content -Path $path -Encoding utf8
           Write-Host "已生成 $path"
 
-      - name: 启动 ds-proxy
+      - name: 指纹采集（同一 step 内起停代理）
         shell: pwsh
         run: |
           $exe = 'target/release/ds-proxy.exe'
           $config = Join-Path $env:RUNNER_TEMP 'running.json'
-          $proc = Start-Process -FilePath $exe -ArgumentList @('--config', $config, '--port', '31182') -PassThru -RedirectStandardOutput "$env:RUNNER_TEMP\proxy.out" -RedirectStandardError "$env:RUNNER_TEMP\proxy.err"
-          "DS_PROXY_PID=$($proc.Id)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          for ($i = 0; $i -lt 50; $i++) {
-            Start-Sleep -Milliseconds 200
-            if (Test-NetConnection -ComputerName 127.0.0.1 -Port 31182 -InformationLevel Quiet -WarningAction SilentlyContinue) {
-              Write-Host '端口已就绪'
-              break
-            }
-          }
-          Get-Content "$env:RUNNER_TEMP\proxy.err" -ErrorAction SilentlyContinue | Write-Host
+          $out = Join-Path $env:RUNNER_TEMP 'proxy.out'
+          $err = Join-Path $env:RUNNER_TEMP 'proxy.err'
+          $md = Join-Path $env:RUNNER_TEMP 'fingerprint.md'
 
-      - name: 采集指纹
-        shell: pwsh
-        run: |
-          $log = Join-Path $env:RUNNER_TEMP 'fp.log'
+          $proc = Start-Process -FilePath $exe `
+            -ArgumentList @('--config', $config, '--port', '31182') `
+            -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
+          Write-Host "ds-proxy pid=$($proc.Id)"
+
           try {
-            pwsh -NoProfile -File tests/e2e/fingerprint_compare.ps1 -Label ${{ github.event.inputs.compare || 'rust' }} `
-              -ProxyUrl http://127.0.0.1:31182 -OutFile "$env:RUNNER_TEMP\fingerprint.md" 2>&1 |
-              Tee-Object -FilePath $log
-            "脚本退出码：$LASTEXITCODE" | Add-Content -Path $log
-          } catch {
-            "脚本异常：$_" | Tee-Object -FilePath $log -Append
-          }
+            $ready = $false
+            for ($i = 0; $i -lt 50; $i++) {
+              Start-Sleep -Milliseconds 200
+              if (Test-NetConnection -ComputerName 127.0.0.1 -Port 31182 -InformationLevel Quiet -WarningAction SilentlyContinue) {
+                $ready = $true
+                break
+              }
+            }
+            Write-Host "端口就绪=$ready，进程已退出=$($proc.HasExited)"
+            if (-not $ready) { throw '代理端口未就绪' }
 
-      - name: 停止代理
-        if: always()
-        shell: pwsh
-        run: |
-          if ($env:DS_PROXY_PID) { Stop-Process -Id $env:DS_PROXY_PID -Force -ErrorAction SilentlyContinue }
-          Get-Content "$env:RUNNER_TEMP\proxy.err" -ErrorAction SilentlyContinue | Select-Object -Last 30 | Write-Host
+            & pwsh -NoProfile -File tests/e2e/fingerprint_compare.ps1 -Label $env:LABEL `
+              -ProxyUrl 'http://127.0.0.1:31182' -OutFile $md
+            Write-Host "采集脚本退出码：$LASTEXITCODE"
+          } finally {
+            if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
+            Write-Host '--- proxy.out（末尾 30 行）---'
+            Get-Content $out -Tail 30 -ErrorAction SilentlyContinue | Write-Host
+            Write-Host '--- proxy.err（末尾 30 行）---'
+            Get-Content $err -Tail 30 -ErrorAction SilentlyContinue | Write-Host
+          }
 
       - name: 上传结果
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: fingerprint-${{ github.event.inputs.compare || 'rust' }}
+          name: fingerprint-${{ env.LABEL }}
           path: |
             ${{ runner.temp }}/fingerprint.md
+            ${{ runner.temp }}/proxy.out
             ${{ runner.temp }}/proxy.err
           retention-days: 30
 
@@ -144,12 +154,11 @@ jobs:
           if (-not (Test-Path $file)) {
             "指纹采集没有产出结果（脚本提前退出）。" | Out-File -FilePath $file -Encoding utf8
           }
-          # 把代理自身的输出也贴进评论，省得去下载 artifact
-          foreach ($name in @('fp.log', 'proxy.err', 'proxy.out')) {
+          foreach ($name in @('proxy.out', 'proxy.err')) {
             $diag = Join-Path $env:RUNNER_TEMP $name
-            if (Test-Path $diag) {
-              Add-Content -Path $file -Value "`n<details><summary>$name（末尾 40 行）</summary>`n"
-              Add-Content -Path $file -Value ((Get-Content $diag -Tail 40) -join "`n")
+            if ((Test-Path $diag) -and ((Get-Item $diag).Length -gt 0)) {
+              Add-Content -Path $file -Value "`n<details><summary>$name（末尾 30 行）</summary>`n"
+              Add-Content -Path $file -Value ((Get-Content $diag -Tail 30) -join "`n")
               Add-Content -Path $file -Value "`n</details>`n"
             }
           }
