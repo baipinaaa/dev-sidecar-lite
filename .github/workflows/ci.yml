@@ -90,18 +90,19 @@ jobs:
         with:
           shared-key: test
 
-      - name: 收集编译错误
+      - name: 收集编译 / clippy / 测试输出
         shell: bash
         run: |
           set +e
-          # --color never：issue 里不需要 ANSI；errors 优先保留（tail 而不是 head），
-          # 因为 cargo 把真正的报错放在最后。
-          cargo check --workspace --all-targets --message-format=short --color never > raw.txt 2>&1
-          echo "exit=$?" >> raw.txt
-          grep -E "error|^warning: unused|-->" raw.txt > errors.txt || true
-          echo "=== 上下文（最后 60 行）===" >> errors.txt
-          tail -n 60 raw.txt >> errors.txt
-          tail -n 60 errors.txt
+          {
+            echo "### cargo check"
+            cargo check --workspace --all-targets --message-format=short --color never 2>&1 | tail -n 40
+            echo "### cargo clippy"
+            cargo clippy --workspace --all-targets --message-format=short --color never 2>&1               | grep -E "^(crates|error|warning: unused)" | head -n 200
+            echo "### cargo test"
+            cargo test --workspace --all-targets --color never 2>&1               | grep -E "^(test result|failures:|---- |thread |error)" | head -n 120
+          } > errors.txt 2>&1
+          cat errors.txt
 
       - name: 提交到 issue
         shell: bash
