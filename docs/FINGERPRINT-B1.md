@@ -97,12 +97,46 @@ python tests/e2e/clienthello_capture.py --compute hello.bin
 - `ja4` 前缀 == `t13d1517h2_` → 可接受（顺序有差异但主要特征齐）
 - 其它 → 不通过，CF 仍会挑战
 
-## 六、下一步（本次先做可行性探针，不做全量接入）
+## 六、探针实测结果（2026-11-16，run 43802243049）
+
+`boring`（BoringSSL 绑定）**5.5.0** 在 `windows-latest` 上：
+
+| 问题 | 答案 |
+| --- | --- |
+| 能否构建 | ✅ 可以，`nasm 2.16.01` + `cmake 4.4.5`，**release 构建 222 秒**（可被 `Swatinem/rust-cache` 缓存） |
+| 有没有 ECH 绑定 | ✅ **有**：`SslRef::set_ech_config_list(&[u8])`（客户端设 ECHConfigList）、`SslRef::set_enable_ech_grease(bool)`、`SSL_get0_ech_retry_configs`、`SSL_marshal_ech_config`、`SSL_ECH_KEYS_*`（服务端） |
+| 指纹对不对得上 | 见下：**除 3 个扩展外全部对齐** |
+
+### 三轮对齐实验（同一嗅探代理抓包，同一把尺子）
+
+| 轮次 | 配置 | JA3 hash | JA4 | 缺什么 |
+| --- | --- | --- | --- | --- |
+| 默认 | 裸 `SslConnector` | `4e8ea6b7…` | `t13d171000_` | 无 ALPN、多 2 个套件、多 group `65074`、扩展 11 个 |
+| 第 2 轮 | `set_cipher_list` + `set_curves_list` + ALPN=h2 | `aef293b1…` | `t13d1511h2_` | **套件/groups/ALPN 已与 Chrome 完全一致**，扩展仍少 6 个 |
+| 第 3 轮 | 再加 `set_permute_extensions` + `enable_ocsp_stapling` + `enable_signed_cert_timestamps` + `set_enable_ech_grease` | `e182f067…` | **`t13d1514h2_`** | 只差 **3 个扩展**：`27`(compress_certificate)、`17613`(ALPS)、`51764` |
+
+Chrome 156 基线：`t13d1517h2_`（17 个扩展），套件/`groups`/`point_formats`/ALPN 与第 3 轮**逐项相同**。
+
+### 得到的结论
+
+1. **套件列表、groups 顺序、ALPN、point_formats 可以用 3 个公开 API 完全对齐**——这三项是 JA3/JA4 里最"重"的部分。
+2. ECH 的两个方向都是通的：真 ECH（`set_ech_config_list`）和 grease（`set_enable_ech_grease`）。
+3. 只剩 3 个扩展没法用安全 API 打开：
+   - `27` compress_certificate：boring 有 `add_certificate_compression_algorithm::<C>()`，但要求实现 `CertCompressionAlgorithm`（真要压缩/解压），不能只"声明支持"；
+   - `17613` ALPS：boring 5.5.0 没暴露，只能 `unsafe` 调 `ffi::SSL_add_application_settings`；
+   - `51764`：连 BoringSSL 上游都没有明文出处（Chrome 私有/实验扩展），只能硬编码塞进扩展列表（需要改库）。
+4. 因为 Chrome 开了 `permute_extensions`，**它的 JA3 每次连接都不一样**，所以"JA3 hash 完全相等"这个判据本身不成立——**正确目标是 JA4（对顺序不敏感）**。第 3 轮 `t13d1514h2_` vs Chrome `t13d1517h2_`，差别只剩扩展数量与扩展集合哈希。
+
+## 七、下一步（本次先做可行性探针，不做全量接入）
 
 CI job `boring-probe` 要回答三个问题：
 1. `boring` 在 windows-latest 上**能不能构建**、耗时多少；
 2. crate 里**有没有** ECH 绑定（grep 源码里的 `ech_config`）；
 3. 顺手用它握手一次，抓 ClientHello 比对 `cccf4f8d…`。
 
-三个答案都正向 → 才进入 B1a 实现（新增 `ds-tls` 的 `fingerprint` 通道 + `intercepts.fingerprint` 配置项）；
-任一为否 → 转向 B1b 或 B1c，不再在 rustls 上耗时间。
+三个答案都已正向（见第六节）→ **B1a 可以进入实现**：新增 `ds-tls` 的 `fingerprint` 通道 + `intercepts.fingerprint` 配置项，默认仍走 rustls，命中的域名切 BoringSSL。
+
+B1a 的最小可用版本（不需要动库、不需要 unsafe）：
+- `ds-tls` 增加 `boring` 依赖与 `chrome_connector()`，配置与第六节第 3 轮一致；
+- ECH 走 `SslRef::set_ech_config_list`（现有 `ds-dns` 已经能拉 ECHConfigList，直接喂进去）；
+- 验收判据改为 **JA4 前缀 `t13d1514h2_`**（对齐到扩展数量 14），并把"能否通过 CF 挑战"作为最终标准（`tests/e2e/cf_acceptance.ps1` 已有）。
