@@ -105,6 +105,42 @@ function installRoots () {
  * @param {...string} segments 相对 `resources/` 的路径片段
  * @returns {string[]} 存在的绝对路径（按优先级）
  */
+/**
+ * 把 `@blue-frontier/<pkg>` 解析到磁盘上的真实目录。
+ *
+ * 为什么需要：core 与 mitmproxy 互相 require（core 要 `@blue-frontier/mitmproxy/src/json`，
+ * mitmproxy 要 `@blue-frontier/dev-sidecar/src/merge`），而安装包里它们是两个并列目录，
+ * 没有走 npm 的 node_modules 布局。SEA 不能建符号链接（也没权限），所以在模块解析层做映射。
+ *
+ * @param {{ mitmproxy?: string, core?: string }} dirs
+ */
+let aliasesInstalled = false
+
+function installPackageAliases (dirs = {}) {
+  if (aliasesInstalled) {
+    return
+  }
+  const Module = require('node:module')
+  const path = require('node:path')
+  const originalResolve = Module._resolveFilename
+
+  Module._resolveFilename = function (request, parent, isMain, options) {
+    if (typeof request === 'string' && request.startsWith('@blue-frontier/')) {
+      const rest = request.slice('@blue-frontier/'.length)
+      const slash = rest.indexOf('/')
+      const name = slash === -1 ? rest : rest.slice(0, slash)
+      const sub = slash === -1 ? '' : rest.slice(slash)
+      const dir = name === 'mitmproxy' ? dirs.mitmproxy : (name === 'dev-sidecar' ? dirs.core : null)
+      if (dir) {
+        return originalResolve.call(this, path.join(dir, sub), parent, isMain, options)
+      }
+    }
+    return originalResolve.call(this, request, parent, isMain, options)
+  }
+
+  aliasesInstalled = true
+}
+
 function findInResources (...segments) {
   const hits = []
   for (const root of installRoots()) {
@@ -121,6 +157,7 @@ function findInResources (...segments) {
 }
 
 module.exports = {
+  installPackageAliases,
   isSea,
   requireFrom,
   installRoots,

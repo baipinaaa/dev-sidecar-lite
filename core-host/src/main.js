@@ -112,7 +112,20 @@ function resolveCore () {
     ...packaged,
   ].filter(Boolean)
 
+  const fs = require('node:fs')
+
   for (const candidate of candidates) {
+    // 候选是本地目录时，先把 @blue-frontier/* 映射过去再 require：
+    // core 与 mitmproxy 互相引用，安装包里它们是并列目录而非 node_modules 布局。
+    if (path.isAbsolute(candidate)) {
+      const mitmproxyDir = path.join(candidate, '..', 'mitmproxy')
+      const hasMitmproxy = fs.existsSync(path.join(mitmproxyDir, 'package.json'))
+      runtime.installPackageAliases({
+        core: candidate,
+        mitmproxy: hasMitmproxy ? mitmproxyDir : undefined,
+      })
+    }
+
     const core = tryRequire(candidate)
     if (core && core.api) {
       return { core, from: candidate }

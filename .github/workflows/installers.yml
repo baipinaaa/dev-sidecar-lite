@@ -32,9 +32,9 @@ on:
         default: 'master'
         type: string
       include_mitmproxy:
-        description: '是否一并打包 Node 引擎（mitmproxy）：需要 monorepo 依赖，一般保持 false'
+        description: '是否一并打包 mitmproxy：core 源码直接 require 它，必须为 true'
         required: false
-        default: 'false'
+        default: 'true'
         type: choice
         options:
           - 'false'
@@ -92,10 +92,9 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($repo)) { $repo = 'baipinaaa/dev-sidecar-clean' }
           $ref = '${{ github.event.inputs.core_ref }}'
           if ([string]::IsNullOrWhiteSpace($ref)) { $ref = 'master' }
-          # 默认不打包 mitmproxy：它的 package.json 用 `workspace:*` 引用 monorepo 内部包，
-          # 单独 npm install 会报 EUNSUPPORTEDPROTOCOL；而数据面已经是 Rust，
-          # mitmproxy 只在 proxy.engine=node 回退时才用。
-          $withMitm = '${{ github.event.inputs.include_mitmproxy }}' -eq 'true'
+          # mitmproxy 必须打包：core 的 config/local-config-loader.js 等 7 处直接
+          # require('@blue-frontier/mitmproxy/src/json')，缺了控制面直接起不来。
+          $withMitm = '${{ github.event.inputs.include_mitmproxy }}' -ne 'false'
           Write-Host "core 仓库 = $repo @ $ref（mitmproxy: $withMitm）"
 
           $paths = @('packages/core')
