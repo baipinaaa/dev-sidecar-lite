@@ -74,15 +74,23 @@ jobs:
           }
           Write-Host "端口 $port 已就绪"
 
+          # 只挑「Cloudflare 托管 + 境外可达」的站点做门禁；
+          # linux.do 留在 informational 里：CI runner 的 IP 已被它限流（实测直连也是 429），
+          # 拿来当门禁只会一直红。
           $urls = @(
-            'https://linux.do/',
-            'https://linux.do/latest.json',
             'https://discord.com/',
+            'https://www.cloudflare.com/',
+            'https://nexusmods.com/',
+            'https://civitai.com/',
             'https://example.com/'
+          )
+          $infoUrls = @(
+            'https://linux.do/'
           )
           python tests/e2e/browser_acceptance.py `
             --port $port `
             --urls @urls `
+            --informational @infoUrls `
             --rounds ([int]'${{ inputs.rounds }}') `
             --direct-control `
             --out $report

@@ -1,0 +1,112 @@
+name: installers
+
+# 在 GitHub 上打出 Windows 安装包（NSIS）。
+#
+# 需要的三块产物：
+#   1. ds-proxy.exe        —— Rust 数据面
+#   2. ds-core-host.exe    —— Node SEA 打包的控制面宿主
+#   3. app/（Tauri 2 壳）  —— 通过 externalBin 把上面两个塞进安装包
+#
+# 注意：ds-core-host 走 Node SEA，只把入口脚本打进可执行文件；它运行时要 `require`
+# Node core 的 node_modules（lodash / @blue-frontier/mitmproxy 等），那部分由
+# dev-sidecar 仓库提供，本仓库 CI 不构建它。
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: '打完包后以此 tag 建一个 draft release（留空只出 artifact）'
+        required: false
+        default: ''
+        type: string
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  windows-installer:
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: '. -> target'
+
+      - name: 生成占位图标（仓库不提交二进制图标）
+        run: python scripts/gen-icons.py
+
+      - name: 构建数据面 ds-proxy
+        run: cargo build --release -p ds-proxy
+
+      - name: 构建控制面 ds-core-host（Node SEA）
+        run: |
+          npm install -g postject
+          node core-host/scripts/build-sea.js
+
+      - name: 放置 sidecar 二进制
+        shell: pwsh
+        run: pwsh -File scripts/prepare-binaries.ps1
+
+      - name: 安装前端依赖
+        working-directory: app
+        run: npm install
+
+      - name: 没配签名密钥时关掉 updater 产物
+        shell: pwsh
+        run: |
+          # tauri 的 createUpdaterArtifacts 要求有签名私钥；没有密钥就直接关掉，
+          # 否则打包会失败（本地有密钥的人把 secrets 配上即可自动打开）。
+          if ('${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}' -eq '') {
+            python scripts/strip-updater.py
+          } else {
+            Write-Host '检测到签名密钥，保留 updater 产物'
+          }
+
+      - name: 打包
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: app
+          args: --target x86_64-pc-windows-msvc
+          tagName: ${{ github.event.inputs.release_tag }}
+          releaseName: ${{ github.event.inputs.release_tag }}
+          releaseDraft: true
+          includeUpdaterJson: false
+
+      - name: 上传安装包
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          if-no-files-found: warn
+          path: |
+            app/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+            app/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.sig
+            app/src-tauri/target/release/bundle/nsis/*.exe
+
+      - name: 打印产物清单
+        if: always()
+        shell: pwsh
+        run: |
+          Get-ChildItem -Recurse -Include *.exe,*.msi,*.sig -Path app/src-tauri/target |
+            Where-Object { $_.FullName -like '*bundle*' } |
+            Select-Object @{n='文件';e={$_.Name}}, @{n='大小MB';e={[math]::Round($_.Length/1MB,1)}} |
+            Format-Table -AutoSize

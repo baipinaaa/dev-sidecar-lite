@@ -238,6 +238,12 @@ def main() -> int:
     ap.add_argument("--rounds", type=int, default=2)
     ap.add_argument("--budget", type=float, default=20.0)
     ap.add_argument(
+        "--informational",
+        nargs="*",
+        default=[],
+        help="只记录、不计入失败的 URL（例如 CI runner IP 已被限流的站点）",
+    )
+    ap.add_argument(
         "--direct-control",
         action="store_true",
         help="额外来一轮「不挂代理」的对照，用来区分「指纹没骗过 CF」和「线路 IP 被限流」",
@@ -259,12 +265,14 @@ def main() -> int:
             for url in args.urls:
                 res = probe_url(devtools_port, url, args.budget)
                 ok = res["status"] == 200 and not res["challenge"]
+                info_only = url in args.informational
                 extra = "挑战页" if res["challenge"] else "正常"
+                tag = "INFO" if info_only else ("PASS" if ok else "FAIL")
                 print(
-                    f"[{'PASS' if ok else 'FAIL'}] 第{rnd}轮 {url} -> "
+                    f"[{tag}] 第{rnd}轮 {url} -> "
                     f"{res['status']} / {extra} / 标题 {res['title']!r}"
                 )
-                rows.append({"round": rnd, "ok": ok, **res})
+                rows.append({"round": rnd, "ok": ok, "informational": info_only, **res})
         finally:
             if process is not None:
                 process.kill()
@@ -278,8 +286,9 @@ def main() -> int:
             for url in args.urls:
                 res = probe_url(devtools_port, url, args.budget)
                 ok = res["status"] == 200 and not res["challenge"]
-                print(f"[{'PASS' if ok else 'FAIL'}] 直连对照 {url} -> {res['status']} / 标题 {res['title']!r}")
-                control_rows.append({"round": 0, "ok": ok, **res})
+                tag = "INFO" if url in args.informational else ("PASS" if ok else "FAIL")
+                print(f"[{tag}] 直连对照 {url} -> {res['status']} / 标题 {res['title']!r}")
+                control_rows.append({"round": 0, "ok": ok, "informational": url in args.informational, **res})
         finally:
             if process is not None:
                 process.kill()
@@ -305,7 +314,8 @@ def main() -> int:
                 lines.append(f"| {url} | {codes} | {challenged} |")
         io.open(args.out, "w", encoding="utf-8", newline="\n").write("\n".join(lines) + "\n")
 
-    failed = [r for r in rows if not r["ok"]]
+    # 只把非 informational 的失败计入退出码
+    failed = [r for r in rows if not r["ok"] and not r.get("informational")]
     print("=== 结论 ===")
     for row in rows:
         print(f"{row['url']} 第{row['round']}轮 {'通过' if row['ok'] else '失败'} 状态码 {row['status']} 挑战 {row['challenge']}")

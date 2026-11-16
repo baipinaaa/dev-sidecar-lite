@@ -147,6 +147,19 @@ pub fn chrome_connect(
         debug!("{host} 未能添加 ALPS（application_settings），JA4 会少 17613");
     }
 
+    // 扩展 51764（0xCA34）= draft-ietf-tls-trust-anchor-ids 的 `trust_anchors`。
+    // Chrome 131+ 每次握手都带一个**空列表**，只表示"支持 trust-anchor 重试流程"。
+    // boring 也没导出这个函数，同样自己声明符号。
+    #[allow(unsafe_code)]
+    let trust_anchors_ok = {
+        let raw = ssl.as_ptr() as *mut core::ffi::c_void;
+        // SAFETY: 同 ALPS —— `ssl` 在本函数内独占有效，传的是空列表（长度 0）。
+        unsafe { set_empty_requested_trust_anchors(raw) }
+    };
+    if !trust_anchors_ok {
+        debug!("{host} 未能添加 trust_anchors（51764），JA4 会是 16 个扩展");
+    }
+
     let mut stream = SslStream::new(ssl, tcp)?;
     // 必须用 `Pin::new(..).connect()` 而不是 `do_handshake()`：
     // 只有前者会把 SSL 置成"客户端连接态"，后者直接报 `CONNECTION_TYPE_NOT_SET`。
@@ -195,6 +208,26 @@ unsafe fn add_application_settings(ssl: *mut core::ffi::c_void) -> bool {
             0,
         ) == 1
     }
+}
+
+/// `SSL_set1_requested_trust_anchors` 让 ClientHello 带上扩展 51764（trust_anchors）。
+///
+/// 传空列表时 BoringSSL 仍会发送该扩展（见其 `ssl.h` 注释：
+/// "If empty (ids_len is zero), the trust_anchors extension will still be sent"），
+/// 正好对应 Chrome 的行为。
+#[allow(unsafe_code)]
+unsafe fn set_empty_requested_trust_anchors(ssl: *mut core::ffi::c_void) -> bool {
+    extern "C" {
+        fn SSL_set1_requested_trust_anchors(
+            ssl: *mut core::ffi::c_void,
+            ids: *const u8,
+            ids_len: usize,
+        ) -> core::ffi::c_int;
+    }
+    // 空列表也要求指针非空更保险（BoringSSL 内部会做 MakeSpan(ids, 0)）。
+    static EMPTY: [u8; 0] = [];
+    // SAFETY: 调用方保证 `ssl` 指向有效 `SSL*`；`EMPTY` 是静态零长数组，长度 0。
+    unsafe { SSL_set1_requested_trust_anchors(ssl, EMPTY.as_ptr(), 0) == 1 }
 }
 
 #[cfg(test)]
