@@ -84,6 +84,7 @@ jobs:
             --port $port `
             --urls @urls `
             --rounds ([int]'${{ inputs.rounds }}') `
+            --direct-control `
             --out $report
           $code = $LASTEXITCODE
           Write-Host "浏览器验收退出码：$code"

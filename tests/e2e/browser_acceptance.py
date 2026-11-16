@@ -155,7 +155,7 @@ def find_chrome(explicit: str | None) -> str | None:
     return None
 
 
-def launch(chrome: str, proxy_port: int) -> tuple[subprocess.Popen, str]:
+def launch(chrome: str, proxy_port: int | None) -> tuple[subprocess.Popen, str]:
     workdir = tempfile.mkdtemp(prefix="ds-browser-")
     profile = os.path.join(workdir, "profile")
     os.makedirs(profile, exist_ok=True)
@@ -172,7 +172,7 @@ def launch(chrome: str, proxy_port: int) -> tuple[subprocess.Popen, str]:
             "--ignore-certificate-errors",
             "--remote-debugging-port=0",
             f"--user-data-dir={profile}",
-            f"--proxy-server=http://127.0.0.1:{proxy_port}",
+            (f"--proxy-server=http://127.0.0.1:{proxy_port}" if proxy_port else "--no-proxy-server"),
             f"--user-agent={CHROME_UA}",
             "about:blank",
         ],
@@ -237,6 +237,11 @@ def main() -> int:
     ap.add_argument("--urls", nargs="+", required=True)
     ap.add_argument("--rounds", type=int, default=2)
     ap.add_argument("--budget", type=float, default=20.0)
+    ap.add_argument(
+        "--direct-control",
+        action="store_true",
+        help="额外来一轮「不挂代理」的对照，用来区分「指纹没骗过 CF」和「线路 IP 被限流」",
+    )
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
@@ -264,6 +269,21 @@ def main() -> int:
             if process is not None:
                 process.kill()
 
+    control_rows: list[dict] = []
+    if args.direct_control:
+        print("--- 对照：同一浏览器、不挂代理 ---")
+        process = None
+        try:
+            process, devtools_port = launch(chrome, None)
+            for url in args.urls:
+                res = probe_url(devtools_port, url, args.budget)
+                ok = res["status"] == 200 and not res["challenge"]
+                print(f"[{'PASS' if ok else 'FAIL'}] 直连对照 {url} -> {res['status']} / 标题 {res['title']!r}")
+                control_rows.append({"round": 0, "ok": ok, **res})
+        finally:
+            if process is not None:
+                process.kill()
+
     if args.out:
         lines = ["| 目标 | 通过 | 状态码 | 挑战页 |", "| --- | --- | --- | --- |"]
         for url in args.urls:
@@ -272,6 +292,17 @@ def main() -> int:
             codes = ",".join(str(r["status"]) for r in subset)
             challenged = sum(1 for r in subset if r["challenge"])
             lines.append(f"| {url} | {passed}/{len(subset)} | {codes} | {challenged} |")
+        if control_rows:
+            lines.append("")
+            lines.append("对照（同一浏览器、不挂代理）：")
+            lines.append("")
+            lines.append("| 目标 | 状态码 | 挑战页 |")
+            lines.append("| --- | --- | --- |")
+            for url in args.urls:
+                subset = [r for r in control_rows if r["url"] == url]
+                codes = ",".join(str(r["status"]) for r in subset)
+                challenged = sum(1 for r in subset if r["challenge"])
+                lines.append(f"| {url} | {codes} | {challenged} |")
         io.open(args.out, "w", encoding="utf-8", newline="\n").write("\n".join(lines) + "\n")
 
     failed = [r for r in rows if not r["ok"]]
