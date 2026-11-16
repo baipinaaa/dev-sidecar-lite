@@ -107,20 +107,19 @@ async fn upstream_client_config(config: &RuntimeConfig, host: &str) -> Arc<rustl
 }
 
 /// 是否应该解密该域名。
+///
+/// 注意：这里必须用 `matcher::glob_match`（它能处理"纯字面量"规则），
+/// 而不是 `matcher::compile` —— 后者对不含 `*`/`?` 且不以 `^` 开头的规则返回 `None`，
+/// 表示"该走精确比较"，直接当失败会让 **所有精确域名规则永久失效**
+/// （2026-11-16 验收时就因此把 linux.do 当隧道放过去了，测到的是 curl 的指纹）。
 pub fn should_intercept(config: &RuntimeConfig, host: &str) -> bool {
     if !config.intercept.enabled {
         return false;
     }
-    config
-        .intercepts
-        .keys()
-        .any(|pattern| match ds_types::matcher::compile(pattern) {
-            Some(re) => re.is_match(host),
-            None => {
-                tracing::debug!("intercepts 规则 {pattern} 为空或非法，已跳过");
-                false
-            }
-        })
+    if ds_rules::guard::bypass_reason(config, host).is_some() {
+        return false;
+    }
+    ds_types::matcher::any_match(config.intercepts.keys().map(|p| p.as_str()), host)
 }
 
 pub async fn handle(
@@ -321,5 +320,44 @@ mod tests {
     fn insecure_config_has_no_h2() {
         let config = ds_tls::client::insecure_client_config();
         assert!(!config.alpn_protocols.iter().any(|p| p.as_slice() == b"h2"));
+    }
+
+    /// 回归：纯字面量规则（真实配置里 137 条有大半是这种）必须能命中，
+    /// 否则 MITM 永远不生效，验收测到的就是 curl 的指纹。
+    #[test]
+    fn should_intercept_matches_exact_domain() {
+        let config = RuntimeConfig::from_json_str(
+            r#"{
+                "intercept": { "enabled": true },
+                "intercepts": {
+                    "linux.do": { ".*": {} },
+                    "*.ldstatic.com": { ".*": {} },
+                    "^(.+\\.)?x\\.com$": { ".*": {} }
+                }
+            }"#,
+        )
+        .expect("配置应可解析");
+
+        assert!(should_intercept(&config, "linux.do"));
+        assert!(should_intercept(&config, "cdn3.ldstatic.com"));
+        assert!(should_intercept(&config, "x.com"));
+        assert!(!should_intercept(&config, "www.baidu.com"));
+
+        // 白名单优先：命中白名单的域名即使配有 intercepts 也不解密
+        let mut with_wl = config.clone();
+        with_wl
+            .white_list
+            .insert("linux.do".into(), ds_types::FlexBool(true));
+        assert!(!should_intercept(&with_wl, "linux.do"));
+    }
+
+    /// `intercept.enabled = false` 时一律走隧道
+    #[test]
+    fn should_intercept_respects_global_switch() {
+        let config = RuntimeConfig::from_json_str(
+            r#"{ "intercept": { "enabled": false }, "intercepts": { "linux.do": { ".*": {} } } }"#,
+        )
+        .expect("配置应可解析");
+        assert!(!should_intercept(&config, "linux.do"));
     }
 }
