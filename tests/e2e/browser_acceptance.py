@@ -32,7 +32,7 @@ import sys
 import tempfile
 import time
 from urllib.parse import urlparse
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 sys.stdout.reconfigure(encoding="utf-8")
 
@@ -191,7 +191,9 @@ def launch(chrome: str, proxy_port: int) -> tuple[subprocess.Popen, str]:
 
 
 def open_tab(port: str) -> str:
-    reply = urlopen(f"http://127.0.0.1:{port}/json/new?about:blank", timeout=10).read()
+    # `/json/new` 只接受 PUT，用 GET 会 405（ctf 阶段踩过）。
+    request = Request(f"http://127.0.0.1:{port}/json/new?about:blank", method="PUT")
+    reply = urlopen(request, timeout=10).read()
     return json.loads(reply)["webSocketDebuggerUrl"]
 
 
