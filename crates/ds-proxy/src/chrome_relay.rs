@@ -48,7 +48,7 @@ where
 {
     let (mut client_read, mut client_write) = tokio::io::split(client);
 
-    let (up_tx, up_rx) = mpsc::channel::<Vec<u8>>(CHANNEL_CAPACITY);
+    let (up_tx, mut up_rx) = mpsc::channel::<Vec<u8>>(CHANNEL_CAPACITY);
     let (down_tx, mut down_rx) = mpsc::channel::<Vec<u8>>(CHANNEL_CAPACITY);
 
     // 阻塞线程：BoringSSL 握手 + 双向搬运。
