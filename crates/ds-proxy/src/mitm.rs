@@ -410,6 +410,7 @@ mod tests {
                 "intercept": { "enabled": true },
                 "intercepts": {
                     "linux.do": { ".*": { "fingerprint": "chrome" } },
+                    "*.linux.do": { ".*": { "fingerprint": "chrome" } },
                     "github.com": { ".*": {} },
                     "*.ldstatic.com": { "/assets/.*": { "fingerprint": "chrome" } }
                 }
@@ -418,8 +419,10 @@ mod tests {
         .expect("配置应可解析");
 
         assert!(wants_chrome_fingerprint(&config, "linux.do"));
-        // 根域子域都命中（通配符覆盖根域由 PAC 层负责，这里只测 glob 的子域语义）
+        // 裸域名规则只匹配自己（与 Node 版一致）；子域要靠 `*.x` 单独写。
+        // 根域是否也算命中由 PAC 层决定（那边 `*.x` 会额外覆盖根域），两层分工不同。
         assert!(wants_chrome_fingerprint(&config, "www.linux.do"));
+        assert!(wants_chrome_fingerprint(&config, "cdn3.linux.do"));
         assert!(!wants_chrome_fingerprint(&config, "github.com"));
         // 指纹只认 `*` / `.*` 兜底路径：写在具体路径上不生效
         assert!(!wants_chrome_fingerprint(&config, "cdn3.ldstatic.com"));
