@@ -55,7 +55,7 @@ def find_chrome(explicit: str | None) -> str | None:
     return None
 
 
-def run_once(chrome: str, proxy_port: int, url: str, budget_ms: int) -> dict:
+def run_once(chrome: str, proxy_port: int, url: str, budget_ms: int, debug: bool = False) -> dict:
     workdir = tempfile.mkdtemp(prefix="ds-browser-")
     profile = os.path.join(workdir, "profile")
     netlog = os.path.join(workdir, "netlog.json")
@@ -98,16 +98,51 @@ def run_once(chrome: str, proxy_port: int, url: str, budget_ms: int) -> dict:
     result["netlog_bytes"] = len(raw)
     shutil.rmtree(workdir, ignore_errors=True)
 
-    # 文档请求：url 完全相同的那条事件；退化为「包含目标 host 的第一条」
-    needle = f'"url":"{url}"'
-    idx = raw.find(needle)
-    if idx < 0:
-        idx = raw.find(result["host"])
-    if idx >= 0:
-        window = raw[idx : idx + 3000]
-        codes = re.findall(r'"status_code":(\d+)', window)
-        if codes:
-            result["status"] = int(codes[-1])
+    result["status"] = parse_netlog(raw, result["host"], debug=debug)
+    return result
+
+
+def parse_netlog(raw: str, host: str, debug: bool = False) -> int | None:
+    """从 netlog 里取该 host 文档请求的最终状态码。
+
+    netlog 结构：`{"constants":..., "events":[{"source":{"id":..},"params":{...}}]}`
+    `params.url` 与 `params.response_info.status_code` 可能落在同一条 URL_REQUEST 事件里，
+    也可能分散在不同 phase 的事件里（靠 `source.id` 关联），所以先建 id→url 映射再回填。
+    解析失败时退化为正则（兼容 `"status_code": 200` 这种带空格的格式）。
+    """
+    try:
+        data = json.loads(raw)
+    except Exception as err:  # noqa: BLE001 - netlog 偶尔被截断
+        if debug:
+            print(f"  [debug] netlog 不是合法 JSON：{err}；改用正则")
+        codes = re.findall(r'"status_code"\s*:\s*(\d+)', raw)
+        return int(codes[-1]) if codes else None
+
+    events = data.get("events") or []
+    url_by_source: dict[int, str] = {}
+    for event in events:
+        params = event.get("params") or {}
+        url = params.get("url")
+        source_id = (event.get("source") or {}).get("id")
+        if isinstance(url, str) and source_id is not None:
+            url_by_source[source_id] = url
+
+    found: list[tuple[str, int]] = []
+    for event in events:
+        params = event.get("params") or {}
+        info = params.get("response_info") or {}
+        code = info.get("status_code")
+        if not isinstance(code, int):
+            continue
+        source_id = (event.get("source") or {}).get("id")
+        url = url_by_source.get(source_id) or params.get("url")
+        if isinstance(url, str) and host in url:
+            found.append((url, code))
+
+    if debug:
+        print(f"  [debug] events={len(events)} 命中={found[-4:]}")
+
+    return found[-1][1] if found else None
     return result
 
 
@@ -130,7 +165,7 @@ def main() -> int:
     rows = []
     for rnd in range(1, args.rounds + 1):
         for url in args.urls:
-            res = run_once(chrome, args.port, url, args.budget_ms)
+            res = run_once(chrome, args.port, url, args.budget_ms, debug=True)
             ok = res["status"] == 200
             verdict = "PASS" if ok else "FAIL"
             print(
