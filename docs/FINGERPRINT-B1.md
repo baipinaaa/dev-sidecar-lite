@@ -177,3 +177,43 @@ B1a 的最小可用版本（不需要动库、不需要 unsafe）：
    对 BoringSSL 是可重试的），这样不需要任何 `unsafe` 也不会有背压死锁。
 4. **证书压缩用 `miniz_oxide` 只实现解压**（`CAN_COMPRESS=false`）：Chrome 也是这样，
    目的只是让扩展 27 出现在 ClientHello 里。
+
+## 九、实验收尾：51764 是 trust_anchors，JA4 已与 Chrome 一致
+
+之前实测差一个扩展（Chrome 17 个、我们 16 个），那个扩展号是 **51764 = `0xCA34`**。
+在 BoringSSL 的 `include/openssl/tls1.h` 里定义为：
+
+```c
+// This is not an IANA defined extension number
+// TODO(crbug.com/398275713): Replace with the final codepoint once standardization completes.
+#define TLSEXT_TYPE_trust_anchors 0xca34
+```
+
+对应 `draft-ietf-tls-trust-anchor-ids` 的 `trust_anchors` 扩展。客户端要发它必须调用
+`SSL_set1_requested_trust_anchors(ssl, ids, ids_len)`；传**空列表**时 BoringSSL 仍会发送该扩展
+（`ssl.h` 原文：*"If empty (ids_len is zero), the trust_anchors extension will still be sent"*），
+正好对应 Chrome 的行为。`boring` crate 没有导出这个函数，我们照 ALPS 的做法自己声明符号：
+
+```rust
+extern "C" {
+    fn SSL_set1_requested_trust_anchors(ssl: *mut c_void, ids: *const u8, ids_len: usize) -> c_int;
+}
+```
+
+补上之后重新抓包：
+
+| 指标 | 结果 |
+| --- | --- |
+| JA4 | **`t13d1517h2_`（与 Chrome 156 基线完全一致）** |
+| 扩展集合 | `5,10,11,13,16,18,23,27,35,43,45,51,51764,65037,65281,17613,0` —— 与 Chrome 逐个相同，仅顺序不同（Chrome 自己也是随机顺序） |
+| JA3 hash | `9203b30394454c8e1775383d829ac98a`（每次不同 —— 因为 `SSL_set_permute_extensions` 会打乱顺序，Chrome 同样如此） |
+
+**JA3 hash 不应该也不可能稳定相等**：Chrome 从 M110 起开启扩展顺序打乱，JS 侧所有
+"JA3 比对"工具都会因此失效；判定标准必须是 JA4（对顺序不敏感）。
+
+### 剩下的 403 不是指纹问题
+补完 51764 后，真浏览器验收里 `discord.com` / `www.cloudflare.com` / `example.com` 稳定 200，
+而 `nexusmods.com`、`civitai.com`（时好时坏）、`linux.do` 仍会返回 `Just a moment`。
+用「同一浏览器、不挂代理」的对照组确认：CI runner 直连同样是 403/429 —— 这是
+**Cloudflare 按 IP 信誉/站点安全策略**做的判定（数据中心 IP + 全新无 Cookie 客户端），
+不是 TLS 指纹能解决的。

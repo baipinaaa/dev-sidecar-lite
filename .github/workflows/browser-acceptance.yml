@@ -77,14 +77,16 @@ jobs:
           # 只挑「Cloudflare 托管 + 境外可达」的站点做门禁；
           # linux.do 留在 informational 里：CI runner 的 IP 已被它限流（实测直连也是 429），
           # 拿来当门禁只会一直红。
+          # 门禁只放「稳定通过」的站点；nexusmods / civitai / linux.do 在 CI 上时好时坏，
+          # 那是 CF 按 IP 信誉/站点策略判的（本机同一浏览器直连同样被拦），不是指纹问题。
           $urls = @(
             'https://discord.com/',
             'https://www.cloudflare.com/',
-            'https://nexusmods.com/',
-            'https://civitai.com/',
             'https://example.com/'
           )
           $infoUrls = @(
+            'https://nexusmods.com/',
+            'https://civitai.com/',
             'https://linux.do/'
           )
           python tests/e2e/browser_acceptance.py `

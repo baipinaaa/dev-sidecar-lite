@@ -48,7 +48,13 @@ function main () {
     '--sentinel-fuse',
     'NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2',
   ]
-  run(process.platform === 'win32' ? 'postject.cmd' : 'postject', postjectArgs)
+  // Windows 上 postject 是 .cmd，Node 20.12+ 出于 CVE-2024-27980 不允许无 shell 直接 spawn，
+  // 会报 `spawnSync postject.cmd EINVAL`，所以这里显式走 shell。
+  execFileSync(
+    process.platform === 'win32' ? 'postject.cmd' : 'postject',
+    postjectArgs,
+    { stdio: 'inherit', cwd: root, shell: process.platform === 'win32' }
+  )
 
   const size = (fs.statSync(outPath).size / 1024 / 1024).toFixed(1)
   console.log(`\n完成：${outPath}（${size} MB）`)
