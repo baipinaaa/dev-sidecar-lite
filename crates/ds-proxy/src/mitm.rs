@@ -192,7 +192,10 @@ pub async fn handle(
         std_tcp.set_nonblocking(false).context("设置上游为阻塞模式失败")?;
         let ech = ech_bytes(&opts.config, &host).await;
         tracing::debug!("{host} 走 Chrome 指纹通道");
-        return crate::chrome_relay::relay(tls, std_tcp, host, ech, handle).await;
+        // 中继内部已经调用 `handle.finish(up, down)` 记账。
+        return crate::chrome_relay::relay(tls, std_tcp, host, ech, handle)
+            .await
+            .map(|_| ());
     }
 
     let head = http::read_head(&mut tls, MAX_HEAD).await?;

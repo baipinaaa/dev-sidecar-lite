@@ -81,11 +81,11 @@ fn build_connector() -> Result<SslConnector> {
     builder.set_alpn_protos(CHROME_ALPN)?;
 
     // Chrome 的扩展顺序是随机的；不开这个，JA4 一致但 JA3 会固定成一个非 Chrome 的值。
-    let _ = builder.set_permute_extensions(true);
+    builder.set_permute_extensions(true);
 
     // 扩展 5（status_request）与 18（signed_certificate_timestamp）。
-    let _ = builder.enable_ocsp_stapling();
-    let _ = builder.enable_signed_cert_timestamps();
+    builder.enable_ocsp_stapling();
+    builder.enable_signed_cert_timestamps();
 
     // 扩展 27（compress_certificate）。
     let _ = builder.add_certificate_compression_algorithm(ZlibDecompressor);
@@ -106,7 +106,7 @@ pub fn chrome_connect(host: &str, tcp: TcpStream, ech: Option<&[u8]>) -> Result<
 
     // 扩展 65037（encrypted_client_hello）。grease 与真 ECH 不冲突：
     // ZlibDecompressor 之外，grease 保证"即使没有配置也带这个扩展"。
-    let _ = ssl.set_enable_ech_grease(true);
+    ssl.set_enable_ech_grease(true);
     if let Some(bytes) = ech {
         ssl.set_ech_config_list(bytes)?;
         debug!("{host} 上游握手携带 ECH（{} 字节配置）", bytes.len());
