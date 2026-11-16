@@ -134,8 +134,26 @@ jobs:
 
           $exe = Join-Path $env:PROBE_DIR "target/release/fingerprint-probe.exe"
           & $exe "127.0.0.1:$port" "example.com" 2>&1 | Out-String | Write-Host
-          Start-Sleep -Seconds 1
+          Start-Sleep -Milliseconds 500
           if ($rec -and -not $rec.HasExited) { Stop-Process -Id $rec.Id -Force -ErrorAction SilentlyContinue }
+
+          # 第二轮：chrome 模式（按 Chrome 156 的 JA3 反推配置）
+          $out2 = Join-Path $env:RUNNER_TEMP "probe-clienthello-chrome.bin"
+          $rec2 = Start-Process -FilePath "python" -PassThru -NoNewWindow `
+            -ArgumentList @("-u", (Resolve-Path "tests/e2e/clienthello_capture.py").Path, "--listen", "$port", "--out", "$out2", "--timeout", "30") `
+            -RedirectStandardOutput (Join-Path $env:RUNNER_TEMP "rec2.log") -RedirectStandardError (Join-Path $env:RUNNER_TEMP "rec2.err")
+          Start-Sleep -Milliseconds 1500
+          & $exe "127.0.0.1:$port" "example.com" "chrome" 2>&1 | Out-String | Write-Host
+          Start-Sleep -Seconds 1
+          if ($rec2 -and -not $rec2.HasExited) { Stop-Process -Id $rec2.Id -Force -ErrorAction SilentlyContinue }
+          if (Test-Path $out2) {
+            Write-Host "=== 探针指纹（chrome 模式）==="
+            $json2 = python tests/e2e/clienthello_capture.py --compute $out2
+            $json2 | Out-String | Write-Host
+            $json2 | Out-File -Encoding utf8 (Join-Path $env:RUNNER_TEMP "probe-ja3-chrome.json")
+          } else {
+            Write-Host "::warning::chrome 模式没有抓到 ClientHello"
+          }
 
           if (-not (Test-Path $out)) {
             Write-Host "--- recorder stdout ---"
@@ -180,6 +198,19 @@ jobs:
             }
           } else {
             $lines += "- 未取得探针指纹"
+          }
+          $ja3c = Join-Path $env:RUNNER_TEMP "probe-ja3-chrome.json"
+          if (Test-Path $ja3c) {
+            $objc = (Get-Content $ja3c -Raw) | ConvertFrom-Json
+            $lines += ""
+            $lines += "chrome 模式（套件/groups/ALPN/ECH-grease 按 Chrome 156 配置）："
+            $lines += "- JA3：``$($objc.ja3)``"
+            $lines += "- hash：``$($objc.ja3_hash)`` / JA4：``$($objc.ja4)`` / ALPN：``$($objc.alpn -join ', ')``"
+            if ($objc.ja3_hash -eq "cccf4f8d2e3c9bded07b40c216fe6216") {
+              $lines += "- **与 Chrome 156 完全一致 → B1a 可直接落地。**"
+            } else {
+              $lines += "- 仍有差异，需按报告逐项补（扩展顺序 / ALPS / compress_certificate）"
+            }
           }
           ($lines -join "`n") | Out-File -Encoding utf8 (Join-Path $env:RUNNER_TEMP "summary.md")
           gh issue comment 1 --repo ${{ github.repository }} --body-file (Join-Path $env:RUNNER_TEMP "summary.md")
