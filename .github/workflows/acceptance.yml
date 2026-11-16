@@ -100,6 +100,8 @@ jobs:
       - name: CF 验收（同一 step 内起停代理）
         shell: pwsh
         run: |
+          # 让 ds-proxy 打出 debug：ECH 命中 / 未命中、配置字节数都在这层
+          $env:RUST_LOG = 'ds_proxy=debug,info'
           $report = Join-Path $env:RUNNER_TEMP 'acceptance.md'
           $rounds = '${{ github.event.inputs.rounds }}'
           if ([string]::IsNullOrWhiteSpace($rounds)) { $rounds = '3' }
