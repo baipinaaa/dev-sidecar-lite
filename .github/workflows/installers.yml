@@ -32,13 +32,13 @@ on:
         default: 'master'
         type: string
       include_mitmproxy:
-        description: '是否一并打包 Node 引擎（mitmproxy）；默认 false，因为数据面用 Rust'
+        description: '是否一并打包 Node 引擎（mitmproxy）：false 更小，但 engine=node 回退不可用'
         required: false
-        default: 'false'
+        default: 'true'
         type: choice
         options:
-          - 'false'
           - 'true'
+          - 'false'
   push:
     tags:
       - 'v*'
@@ -87,32 +87,39 @@ jobs:
         shell: pwsh
         run: |
           # SEA 只把入口脚本打进 ds-core-host.exe，core 是运行时 require 的，
-          # 必须随安装包放到 resources/app/packages/core，否则控制面起不来。
+          # 必须随安装包放到 resources/core-bundle/packages/core，否则控制面起不来。
           $repo = '${{ github.event.inputs.core_repo }}'
           if ([string]::IsNullOrWhiteSpace($repo)) { $repo = 'baipinaaa/dev-sidecar-clean' }
           $ref = '${{ github.event.inputs.core_ref }}'
           if ([string]::IsNullOrWhiteSpace($ref)) { $ref = 'master' }
-          Write-Host "core 仓库 = $repo @ $ref"
+          # 默认一并打包 mitmproxy：core 顶层会引用它，缺了会直接 MODULE_NOT_FOUND
+          $withMitm = '${{ github.event.inputs.include_mitmproxy }}' -ne 'false'
+          Write-Host "core 仓库 = $repo @ $ref（mitmproxy: $withMitm）"
+
+          $paths = @('packages/core')
+          if ($withMitm) { $paths += 'packages/mitmproxy' }
           git clone --depth 1 --filter=blob:none --sparse --branch $ref "https://github.com/$repo.git" core-src
           if ($LASTEXITCODE -ne 0) { throw "clone $repo@$ref 失败" }
-          git -C core-src sparse-checkout set packages/core
+          git -C core-src sparse-checkout set @paths
           if ($LASTEXITCODE -ne 0) { throw 'sparse-checkout 失败' }
-
-          $coreSrc = Join-Path (Get-Location) 'core-src/packages/core'
-          if (-not (Test-Path (Join-Path $coreSrc 'package.json'))) {
-            throw "core 目录不完整：$coreSrc（ref=$ref 是否存在？）"
-          }
 
           # 必须 cd 进去再装：npm 的 --prefix 在 npm 11 上仍会读当前目录的 package.json，
           # 仓库根没有 package.json，直接报 ENOENT。
-          Push-Location $coreSrc
-          try {
-            npm install --omit=dev --no-audit --no-fund
-            if ($LASTEXITCODE -ne 0) { throw 'core 依赖安装失败' }
-          } finally {
-            Pop-Location
+          foreach ($pkg in $paths) {
+            $dir = Join-Path (Get-Location) "core-src/$pkg"
+            if (-not (Test-Path (Join-Path $dir 'package.json'))) {
+              throw "包目录不完整：$dir（ref=$ref 是否存在？）"
+            }
+            Push-Location $dir
+            try {
+              npm install --omit=dev --no-audit --no-fund
+              if ($LASTEXITCODE -ne 0) { throw "$pkg 依赖安装失败" }
+            } finally {
+              Pop-Location
+            }
+            Write-Host "依赖已安装：$dir/node_modules"
           }
-          Write-Host "core 依赖已安装：$coreSrc/node_modules" 
+          $global:LASTEXITCODE = 0
 
       - name: 把 core 放进安装包资源目录
         shell: pwsh
@@ -125,7 +132,17 @@ jobs:
           # 排除测试与缓存，避免把体积撑大
           robocopy core-src/packages/core $dest /E /NFL /NDL /NJH /NJS `
             /XD core-src/packages/core/test core-src/packages/core/.cache | Out-Null
-          if ($LASTEXITCODE -ge 8) { throw "robocopy 失败，退出码 $LASTEXITCODE" }
+          if ($LASTEXITCODE -ge 8) { throw "robocopy(core) 失败，退出码 $LASTEXITCODE" }
+
+          if (Test-Path 'core-src/packages/mitmproxy/package.json') {
+            $mitmDest = 'app/src-tauri/core-bundle/packages/mitmproxy'
+            New-Item -ItemType Directory -Force -Path $mitmDest | Out-Null
+            robocopy core-src/packages/mitmproxy $mitmDest /E /NFL /NDL /NJH /NJS `
+              /XD core-src/packages/mitmproxy/test core-src/packages/mitmproxy/.cache | Out-Null
+            if ($LASTEXITCODE -ge 8) { throw "robocopy(mitmproxy) 失败，退出码 $LASTEXITCODE" }
+          } else {
+            Write-Host '未打包 mitmproxy（engine=node 回退将不可用）' -ForegroundColor Yellow
+          }
           $size = [math]::Round(((Get-ChildItem $dest -Recurse -File | Measure-Object Length -Sum).Sum / 1MB), 1)
           Write-Host "core 资源目录: $dest（${size} MB）"
           Copy-Item core-src/packages/core/package.json $dest/package.json -Force

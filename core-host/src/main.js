@@ -75,11 +75,18 @@ function printUsage () {
 `)
 }
 
+const requireErrors = []
+
 function tryRequire (dir) {
   try {
     // SEA 里普通 require 只认内置模块，必须走 runtime 提供的磁盘 require
     return runtime.requireFrom(dir)
   } catch (e) {
+    // 记下真实原因：打包形态下最常见的是「core 在，但它依赖的某个包不在」，
+    // 只抛一句"无法加载 core 模块"会让人以为是路径问题，白排查半天。
+    const message = String((e && e.message) || e).split('
+')[0]
+    requireErrors.push(`${dir} → ${message}`)
     return null
   }
 }
