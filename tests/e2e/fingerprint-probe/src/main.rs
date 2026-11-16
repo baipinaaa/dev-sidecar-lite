@@ -59,7 +59,7 @@ fn main() {
 
     let mut builder =
         boring::ssl::SslConnector::builder(boring::ssl::SslMethod::tls()).expect("SslConnector::builder");
-    builder.set_verify(boring::ssl::SslVerifyMode::NONE);
+    builder.set_verify_callback(boring::ssl::SslVerifyMode::NONE, |_ok, _ctx| true);
 
     if chrome_mode {
         // ALPN: h2 在前（Chrome 的顺序），wire 格式是"长度前缀 + 名字"
@@ -69,15 +69,41 @@ fn main() {
         builder.set_cipher_list(CHROME_CIPHERS).expect("set_cipher_list");
         // boring 5 的命名是 set_curves_list（不是 OpenSSL 3 的 set_groups_list）
         builder.set_curves_list(CHROME_GROUPS).expect("set_curves_list");
-        // TLS1.3 套件用默认值（BoringSSL 默认就是 4865-4866-4867，与 Chrome 一致）；
-        // 65037（ECH grease）的开关在 SSL 对象上（SSL_set_enable_ech_grease），
-        // 需要 per-connection 设置，等 B1a 真正接入时再处理。
-        println!(
-            "chrome 模式：套件/TLS1.2+groups/ALPN 已按 Chrome 156 配置（TLS1.3 套件用默认）"
-        );
+        // Chrome 会随机化扩展顺序（SSL_set_permute_extensions），这也是为什么
+        // 它的 JA3 每次抓都不一样、而 JA4 稳定（JA4 对顺序不敏感）。
+        builder.set_permute_extensions(true);
+        // 扩展 5（status_request）与 18（SCT）：Chrome 都会发
+        builder.enable_ocsp_stapling();
+        builder.enable_signed_cert_timestamps();
+        // TLS1.3 套件用默认值（BoringSSL 默认就是 4865-4866-4867，与 Chrome 一致）。
+        // 65037（ECH grease）只能在 SSL 对象上开，见下方 connect_chrome()。
+        // 17613（ALPS）、27（compress_certificate）、51764：boring 5.5.0 未暴露，暂无解。
+        println!("chrome 模式：套件/groups/ALPN/status_request/SCT/permute 已按 Chrome 配置");
     }
 
     let connector = builder.build();
+
+    if chrome_mode {
+        // per-connection 才能开 ECH grease（SSL_set_enable_ech_grease）
+        let mut cfg = connector.configure().expect("configure");
+        cfg.set_verify_hostname(false);
+        let ssl = cfg.into_ssl(&host).expect("into_ssl");
+        ssl.set_enable_ech_grease(true);
+        let mut stream = boring::ssl::SslStream::new(ssl, tcp).expect("SslStream::new");
+        std::pin::Pin::new(&mut stream)
+            .connect()
+            .expect("TLS 握手失败（chrome 模式）");
+        let request = format!("GET / HTTP/1.1
+Host: {host}
+Connection: close
+
+");
+        stream.write_all(request.as_bytes()).expect("写请求失败");
+        let mut out: Vec<u8> = Vec::new();
+        let _ = stream.read_to_end(&mut out);
+        println!("chrome 模式握手完成，收到 {} 字节", out.len());
+        return;
+    }
 
     let mut tls = connector.connect(&host, tcp).expect("TLS 握手失败");
     let request = format!("GET / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
