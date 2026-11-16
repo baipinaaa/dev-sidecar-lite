@@ -138,7 +138,11 @@ pub fn chrome_connect(host: &str, tcp: TcpStream, ech: Option<&[u8]>) -> Result<
     }
 
     let mut stream = SslStream::new(ssl, tcp)?;
-    stream.do_handshake()?;
+    // 必须用 `Pin::new(..).connect()` 而不是 `do_handshake()`：
+    // 只有前者会把 SSL 置成"客户端连接态"，后者直接报 `CONNECTION_TYPE_NOT_SET`。
+    std::pin::Pin::new(&mut stream)
+        .connect()
+        .map_err(|err| anyhow!("与 {host} 的 TLS 握手失败: {err}"))?;
     Ok(stream)
 }
 
