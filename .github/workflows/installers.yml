@@ -131,6 +131,11 @@ jobs:
           Copy-Item core-src/packages/core/package.json $dest/package.json -Force
           if (-not (Test-Path "$dest/package.json")) { throw 'core 的 package.json 不存在，require 会失败' }
 
+          # robocopy 成功时返回 1（= 有文件被复制），Actions 会把最后一条原生命令的退出码
+          # 当作步骤退出码，导致步骤被判失败，所以这里显式归零。
+          $global:LASTEXITCODE = 0
+          exit 0
+
       - name: 冒烟 core-host（验证安装包形态能加载 core）
         shell: pwsh
         run: pwsh -File scripts/smoke-core-host.ps1
