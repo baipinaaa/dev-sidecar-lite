@@ -8,6 +8,7 @@
 
 #![forbid(unsafe_code)]
 
+mod chrome_relay;
 mod http;
 mod mitm;
 mod proxy;

@@ -72,12 +72,26 @@ impl Mitm {
 /// ECHConfig 有 TTL，且 CF 会在轮换后返回 `retry_configs`；
 /// 短连接场景下多一次 DoH 查询（~30ms，可与 TCP 建连并行优化）换来的是不会用到过期配置。
 async fn upstream_client_config(config: &RuntimeConfig, host: &str) -> Arc<rustls::ClientConfig> {
+    match ech_bytes(config, host).await {
+        Some(bytes) => match ds_tls::ech::build_upstream_config(false, Some(&bytes)) {
+            Ok(cfg) => cfg,
+            Err(err) => {
+                tracing::warn!("{host} 构建 ECH 配置失败，降级为普通握手：{err:#}");
+                ds_tls::client::insecure_client_config()
+            }
+        },
+        None => ds_tls::client::insecure_client_config(),
+    }
+}
+
+/// 取该域名的 ECHConfigList（拿不到就 `None`）。两条上游通道（rustls / Chrome 指纹）共用。
+async fn ech_bytes(config: &RuntimeConfig, host: &str) -> Option<Vec<u8>> {
     let ech = &config.dns.ech;
     if !(ech.enabled && ech.use_ech) {
-        return ds_tls::client::insecure_client_config();
+        return None;
     }
     if !ds_types::matcher::any_match(ech.domains.iter().map(|s| s.as_str()), host) {
-        return ds_tls::client::insecure_client_config();
+        return None;
     }
 
     let provider = ech
@@ -88,22 +102,46 @@ async fn upstream_client_config(config: &RuntimeConfig, host: &str) -> Arc<rustl
         .or_else(|| config.dns.providers.values().next().map(|p| p.server.clone()));
     let Some(server) = provider else {
         tracing::debug!("{host} 需要 ECH，但没有可用的 DoH 提供方");
-        return ds_tls::client::insecure_client_config();
+        return None;
     };
 
     match ds_dns::resolve_ech(&server, host).await {
-        Ok(Some(bytes)) => match ds_tls::ech::build_upstream_config(false, Some(&bytes)) {
-            Ok(cfg) => {
-                tracing::debug!("{host} 使用 ECH（{} 字节配置，来自 {server}）", bytes.len());
-                return cfg;
-            }
-            Err(err) => tracing::warn!("{host} 构建 ECH 配置失败，降级为普通握手：{err:#}"),
-        },
-        Ok(None) => tracing::debug!("{host} 的 HTTPS 记录里没有 ECH（该站可能未开通）"),
-        Err(err) => tracing::warn!("{host} 查询 ECH 失败：{err:#}"),
+        Ok(Some(bytes)) => {
+            tracing::debug!("{host} 使用 ECH（{} 字节配置，来自 {server}）", bytes.len());
+            Some(bytes)
+        }
+        Ok(None) => {
+            tracing::debug!("{host} 的 HTTPS 记录里没有 ECH（该站可能未开通），改用 ECH grease");
+            None
+        }
+        Err(err) => {
+            tracing::warn!("{host} 查询 ECH 失败：{err:#}");
+            None
+        }
     }
+}
 
-    ds_tls::client::insecure_client_config()
+/// 该域名是否要求走 Chrome 指纹通道。
+///
+/// 判据是 `intercepts` 里命中的规则带 `fingerprint: "chrome"`。只看 `*` / `.*` 这条
+/// 兜底路径：具体路径上的指纹没有意义（同一条连接的 ClientHello 与路径无关）。
+pub fn wants_chrome_fingerprint(config: &RuntimeConfig, host: &str) -> bool {
+    for (pattern, table) in config.intercepts.iter() {
+        if !ds_types::matcher::glob_match(pattern, host) {
+            continue;
+        }
+        for (path, options) in table.iter() {
+            if path != "*" && path != ".*" {
+                continue;
+            }
+            if let Some(options) = options {
+                if options.wants_chrome_fingerprint() {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// 是否应该解密该域名。
@@ -146,6 +184,16 @@ pub async fn handle(
         .accept(prefixed)
         .await
         .with_context(|| format!("与 {host} 的客户端 TLS 握手失败"))?;
+
+    // 指纹通道：不解析 HTTP，握手完就把明文字节双向搬运。
+    if port == 443 && wants_chrome_fingerprint(&opts.config, &host) {
+        let tcp = http::connect_upstream(&host, port).await?;
+        let std_tcp = tcp.into_std().context("把上游连接切回阻塞模式失败")?;
+        std_tcp.set_nonblocking(false).context("设置上游为阻塞模式失败")?;
+        let ech = ech_bytes(&opts.config, &host).await;
+        tracing::debug!("{host} 走 Chrome 指纹通道");
+        return crate::chrome_relay::relay(tls, std_tcp, host, ech, handle).await;
+    }
 
     let head = http::read_head(&mut tls, MAX_HEAD).await?;
     let inner = RequestHead::parse(&head.bytes)
@@ -349,6 +397,30 @@ mod tests {
             .white_list
             .insert("linux.do".into(), ds_types::FlexBool(true));
         assert!(!should_intercept(&with_wl, "linux.do"));
+    }
+
+    /// 只有显式写了 `fingerprint: "chrome"` 的规则才走指纹通道。
+    #[test]
+    fn wants_chrome_fingerprint_only_when_declared() {
+        let config = RuntimeConfig::from_json_str(
+            r#"{
+                "intercept": { "enabled": true },
+                "intercepts": {
+                    "linux.do": { ".*": { "fingerprint": "chrome" } },
+                    "github.com": { ".*": {} },
+                    "*.ldstatic.com": { "/assets/.*": { "fingerprint": "chrome" } }
+                }
+            }"#,
+        )
+        .expect("配置应可解析");
+
+        assert!(wants_chrome_fingerprint(&config, "linux.do"));
+        // 根域子域都命中（通配符覆盖根域由 PAC 层负责，这里只测 glob 的子域语义）
+        assert!(wants_chrome_fingerprint(&config, "www.linux.do"));
+        assert!(!wants_chrome_fingerprint(&config, "github.com"));
+        // 指纹只认 `*` / `.*` 兜底路径：写在具体路径上不生效
+        assert!(!wants_chrome_fingerprint(&config, "cdn3.ldstatic.com"));
+        assert!(!wants_chrome_fingerprint(&config, "www.baidu.com"));
     }
 
     /// `intercept.enabled = false` 时一律走隧道

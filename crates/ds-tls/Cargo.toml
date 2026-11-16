@@ -16,3 +16,6 @@ rustls-native-certs.workspace = true
 rcgen.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
+boring.workspace = true
+miniz_oxide.workspace = true
+foreign-types.workspace = true

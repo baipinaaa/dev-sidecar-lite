@@ -73,6 +73,9 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
+      # boring(BoringSSL) 在 Windows 上需要 nasm 编译汇编文件。
+      - name: 安装 nasm
+        run: choco install nasm -y --no-progress
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -87,6 +90,9 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
+      # boring(BoringSSL) 在 Windows 上需要 nasm 编译汇编文件。
+      - name: 安装 nasm
+        run: choco install nasm -y --no-progress
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -111,6 +117,9 @@ jobs:
       issues: write
     steps:
       - uses: actions/checkout@v5
+      # boring(BoringSSL) 在 Windows 上需要 nasm 编译汇编文件。
+      - name: 安装 nasm
+        run: choco install nasm -y --no-progress
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:

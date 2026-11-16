@@ -331,6 +331,10 @@ pub struct InterceptOptions {
     pub redirect: Option<Value>,
     pub options: Option<Value>,
 
+    /// `"chrome"` 表示这条规则走 Chrome 指纹通道（BoringSSL 复刻 ClientHello）。
+    /// 不写则走 rustls（普通 MITM）。见 docs/FINGERPRINT-B1.md。
+    pub fingerprint: Option<String>,
+
     #[serde(flatten)]
     pub extra: JsonMap,
 }
@@ -344,6 +348,14 @@ impl InterceptOptions {
             .and_then(|h| h.get("alt-svc"))
             .and_then(|v| v.as_str())
             .map(|v| v.eq_ignore_ascii_case("[remove]"))
+            .unwrap_or(false)
+    }
+
+    /// 是否走 Chrome 指纹通道。
+    pub fn wants_chrome_fingerprint(&self) -> bool {
+        self.fingerprint
+            .as_deref()
+            .map(|v| v.eq_ignore_ascii_case("chrome"))
             .unwrap_or(false)
     }
 }

@@ -54,6 +54,13 @@ rustls-pki-types = "1"
 rcgen = { version = "0.13", features = ["pem", "x509-parser"] }
 rustls-native-certs = "0.8"
 
+# --- 指纹伪装：BoringSSL ---
+# 用 Chrome 同源的 BoringSSL 才能把 JA4 对齐（rustls 的扩展顺序/ALPS/ECH grease 都不可控，
+# 结论见 docs/FINGERPRINT.md 与 docs/FINGERPRINT-B1.md）。构建需要 nasm + cmake，约 4 分钟。
+boring = "5"
+miniz_oxide = "0.8"
+foreign-types = "0.3"
+
 # --- DNS ---
 hickory-resolver = { version = "0.24", features = [
   "dns-over-rustls",

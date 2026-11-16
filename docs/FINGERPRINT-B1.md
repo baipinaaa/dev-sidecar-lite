@@ -140,3 +140,40 @@ B1a 的最小可用版本（不需要动库、不需要 unsafe）：
 - `ds-tls` 增加 `boring` 依赖与 `chrome_connector()`，配置与第六节第 3 轮一致；
 - ECH 走 `SslRef::set_ech_config_list`（现有 `ds-dns` 已经能拉 ECHConfigList，直接喂进去）；
 - 验收判据改为 **JA4 前缀 `t13d1514h2_`**（对齐到扩展数量 14），并把"能否通过 CF 挑战"作为最终标准（`tests/e2e/cf_acceptance.ps1` 已有）。
+
+## 八、B1a 实现（已落地）
+
+代码位置与分工：
+
+| 位置 | 作用 |
+| --- | --- |
+| `crates/ds-tls/src/chrome.rs` | `chrome_connect(host, TcpStream, ech)`：BoringSSL connector（套件/曲线/ALPN/permute/OCSP/SCT/证书压缩）+ per-connection 的 ECH grease、真 ECH、ALPS |
+| `crates/ds-tls/src/lib.rs` | `#![deny(unsafe_code)]`（原来是 `forbid`）：只有 `add_application_settings` 一个函数 `#[allow(unsafe_code)]` |
+| `crates/ds-types/src/config.rs` | `InterceptOptions::fingerprint` + `wants_chrome_fingerprint()` |
+| `crates/ds-proxy/src/chrome_relay.rs` | 透明中继：客户端侧 tokio 读写半部 + `spawn_blocking` 里的阻塞 BoringSSL 会话，两个 `mpsc` 通道桥接 |
+| `crates/ds-proxy/src/mitm.rs` | `wants_chrome_fingerprint()` 判定 + 在 `read_head` 之前分流到指纹通道 |
+| `crates/ds-tls/src/bin/chrome-probe.rs` | 本地自检：抓自己发的 ClientHello |
+| `.github/workflows/chrome-fingerprint.yml` | 构建 → 探针 → `clienthello_capture.py --compute` → 判定 `t13d1517h2_` |
+
+配置写法（`~/.dev-sidecar/running.json` 或默认配置的 `server.intercepts`）：
+
+```json5
+{
+  "intercepts": {
+    "linux.do": { ".*": { "fingerprint": "chrome" } },
+    "*.discord.com": { ".*": { "fingerprint": "chrome" } }
+  }
+}
+```
+
+设计取舍：
+
+1. **不改 Node 的 `running.json` 生成逻辑** —— `fingerprint` 是 `InterceptOptions` 的新字段，
+   Node 版读到不认识的字段会原样保留在 `extra` 里，所以两版可以共享同一份配置。
+2. **指纹通道不解析 HTTP**：这些域名只需要"让 CF 看到 Chrome 的 ClientHello"，不需要改内容，
+   所以握手完直接搬运明文字节。少一层解析就少一处与 Node 版行为不一致的地方。
+3. **为什么必须 `spawn_blocking`**：BoringSSL 是同步 IO，`SslStream` 既不能拆成读写两半，
+   也不能注册进 tokio reactor。桥接用 `mpsc` + 50ms 读超时轮转（`WouldBlock`/`TimedOut`
+   对 BoringSSL 是可重试的），这样不需要任何 `unsafe` 也不会有背压死锁。
+4. **证书压缩用 `miniz_oxide` 只实现解压**（`CAN_COMPRESS=false`）：Chrome 也是这样，
+   目的只是让扩展 27 出现在 ClientHello 里。

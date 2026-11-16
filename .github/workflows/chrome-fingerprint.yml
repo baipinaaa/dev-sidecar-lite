@@ -1,0 +1,71 @@
+name: Chrome 指纹自检
+
+# 只回答一个问题：我们自己发出的 ClientHello，JA4 是不是 `t13d1517h2_`。
+#
+# 为什么不放进 ci.yml：这条链路要编译 BoringSSL（+4 分钟）并且要额外跑一次
+# python 解析，属于"改了指纹代码才需要验"的事，挂在每次 push 上太贵。
+# 触发方式：改指纹相关代码后手动跑，或 push 到 chrome-fingerprint 分支。
+
+on:
+  push:
+    branches: [chrome-fingerprint]
+    paths:
+      - "crates/ds-tls/**"
+      - "tests/e2e/clienthello_capture.py"
+      - ".github/workflows/chrome-fingerprint.yml"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+concurrency:
+  group: chrome-fingerprint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    name: 采集并计算 JA4
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: 安装 nasm
+        run: choco install nasm -y --no-progress
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: chrome-fingerprint
+
+      - name: 采集 ClientHello
+        run: |
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          cargo run --release -p ds-tls --bin chrome-probe -- out/chrome-clienthello.bin example.com
+        shell: pwsh
+
+      - name: 计算 JA3 / JA4
+        run: |
+          python tests/e2e/clienthello_capture.py --compute out/chrome-clienthello.bin | Tee-Object -FilePath out/ja4.json
+        shell: pwsh
+
+      - name: 打印结论
+        run: |
+          $json = Get-Content out/ja4.json -Raw | ConvertFrom-Json
+          "JA4 = $($json.ja4)"
+          if ($json.ja4 -like 't13d1517h2_*') {
+            "✅ 与 Chrome 156/157 的 JA4 前缀一致（t13d1517h2_）"
+          } else {
+            "⚠️ JA4 前缀与目标 t13d1517h2_ 不一致，需对照 docs/FINGERPRINT-B1.md 的差距表补扩展"
+          }
+        shell: pwsh
+
+      - name: 回传结果
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chrome-fingerprint
+          path: |
+            out/chrome-clienthello.bin
+            out/ja4.json
+          retention-days: 30

@@ -57,7 +57,7 @@ engine=rust → mitmproxyPath = core-host/shim/rust-engine.js
                      │      ├─ 否 → tunnel：200 + copy_bidirectional
                      │      └─ 是 → MITM
                      │ 4. dns::select：候选 IP 排序（EWMA × 失败惩罚 − 拒绝记忆）
-                     │ 5. 逐个 try：TCP → (ECH? rustls with_ech : 普通 TLS) → HTTP/1.1
+                     │ 5. 逐个 try：TCP → (指纹通道? BoringSSL(Chrome) : rustls(ECH? with_ech : 普通)) → HTTP/1.1
                      │ 6. 回 200，把 leftover 回灌给 TLS acceptor（PrefixedStream）
                      └────────────────────────────────────────┘
 ```
@@ -129,6 +129,7 @@ ds-proxy 用 ds_types::RuntimeConfig 反序列化
 | 场景 | Node 版 | Lite |
 | --- | --- | --- |
 | ECH | 自写 TLS1.3（无 H2、无 GREASE、ALPN 空） | rustls 原生 ECH，ALPN 可协商 h2 |
+| 指纹 | 伪装 `sni` + 自拼 ClientHello（与 Chrome 差 7 个维度） | 双通道：默认 rustls；`fingerprint:"chrome"` 走 BoringSSL，JA4 对齐 `t13d1517h2_` |
 | 取址 | 预置 IP + 动态上游 + 单值串行切换 | 预置 IP + 动态上游 + EWMA 排序 + 并行拨号 |
 | 失败记忆 | 域名级 successRate，30 秒拉黑 | IP 级失败计数 + 域名级 SNI 拒绝 + 路由级 421/403，各自 TTL |
 | 并发 | 单进程事件循环 | tokio 多线程，每连接一个任务 |
