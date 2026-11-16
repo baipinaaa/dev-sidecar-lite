@@ -1,0 +1,111 @@
+name: browser-acceptance
+
+# 真浏览器验收：Chrome/Edge headless 走 ds-proxy，读 netlog 判状态码。
+#
+# 与 acceptance.yml 的分工：
+#   acceptance.yml  = curl 基线（测 TLS 通道能不能通、ECH 有没有用上）
+#   browser-acceptance.yml = 真浏览器（测 Cloudflare 还挑不挑）
+# CF 的 Bot Management 同时看 TLS 指纹、HTTP/2 指纹、header 顺序、UA；
+# curl 的 h2 指纹永远不像 Chrome，所以「骗过 CF」这件事只能用真浏览器验。
+on:
+  workflow_dispatch:
+    inputs:
+      rounds:
+        description: '每个目标跑几轮'
+        required: false
+        default: '2'
+        type: string
+  push:
+    branches: [browser-acceptance]
+    paths:
+      - '.github/workflows/browser-acceptance.yml'
+      - 'tests/e2e/browser_acceptance.py'
+      - 'tests/e2e/acceptance-config.json'
+      - 'crates/**'
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  browser:
+    runs-on: windows-latest
+    timeout-minutes: 40
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: '. -> target'
+
+      - name: 构建 ds-proxy
+        run: cargo build --release -p ds-proxy
+
+      - name: 生成自签 CA（MITM 需要）
+        run: cargo run --release -p ds-tls --bin ds-ca
+
+      # 代理与浏览器测试必须在同一个 step：runner 会在 step 边界收掉后台进程。
+      - name: 启动代理并跑浏览器验收
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $port = 31183
+          $exe  = 'target/release/ds-proxy.exe'
+          $cfg  = 'tests/e2e/acceptance-config.json'
+          $report = Join-Path $env:RUNNER_TEMP 'browser-acceptance.md'
+
+          $proc = Start-Process -FilePath $exe -ArgumentList @('--config', $cfg) -PassThru -NoNewWindow
+          $ready = $false
+          for ($i = 0; $i -lt 60; $i++) {
+            Start-Sleep -Milliseconds 500
+            if (Test-NetConnection -ComputerName 127.0.0.1 -Port $port -InformationLevel Quiet -WarningAction SilentlyContinue) {
+              $ready = $true; break
+            }
+          }
+          if (-not $ready) {
+            Write-Host '代理端口未就绪'
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            exit 1
+          }
+          Write-Host "端口 $port 已就绪"
+
+          $urls = @(
+            'https://linux.do/',
+            'https://linux.do/latest.json',
+            'https://discord.com/',
+            'https://example.com/'
+          )
+          python tests/e2e/browser_acceptance.py `
+            --port $port `
+            --urls @urls `
+            --rounds ([int]'${{ inputs.rounds }}') `
+            --out $report
+          $code = $LASTEXITCODE
+          Write-Host "浏览器验收退出码：$code"
+
+          Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+          $env:ACCEPT_CODE = $code
+          if (Test-Path $report) {
+            $body = Get-Content $report -Raw
+            $marker = "<!-- browser-acceptance -->"
+            $existing = gh issue view 1 --json comments --jq '.comments[] | select(.body | contains("browser-acceptance")) | .databaseId' 2>$null
+            if ($existing) {
+              gh api -X DELETE "repos/${{ github.repository }}/issues/comments/$($existing | Select-Object -First 1)" 2>$null | Out-Null
+            }
+            "## 真浏览器验收（Chrome headless）`n`n$body`n`n$marker" | Out-File -FilePath $env:RUNNER_TEMP\body.md -Encoding utf8
+            gh issue comment 1 --body-file $env:RUNNER_TEMP\body.md
+          }
+          exit $code
+
+      - name: 上传报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-acceptance-report
+          path: ${{ runner.temp }}/browser-acceptance.md
+          if-no-files-found: warn
