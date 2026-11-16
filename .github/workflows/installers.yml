@@ -18,6 +18,29 @@ on:
         required: false
         default: ''
         type: string
+      core_repo:
+        description: 'Node core 所在仓库（控制面运行时依赖）'
+        required: false
+        default: 'baipinaaa/dev-sidecar-clean'
+        type: string
+      core_ref:
+        description: 'Node core 的分支或标签（不能是 commit sha，因为用了 --depth 1）'
+        required: false
+        default: 'master'
+        type: string
+      include_mitmproxy:
+        description: '是否一并打包 Node 引擎（mitmproxy）；默认 false，因为数据面用 Rust'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+      core_ref:
+        description: 'dev-sidecar-clean 仓库的 ref（tag / commit / 分支），默认 master'
+        required: false
+        default: 'master'
+        type: string
   push:
     tags:
       - 'v*'
@@ -61,6 +84,43 @@ jobs:
       - name: 放置 sidecar 二进制
         shell: pwsh
         run: pwsh -File scripts/prepare-binaries.ps1
+
+      - name: 拉取 Node core 并装运行时依赖
+        shell: pwsh
+        run: |
+          # SEA 只把入口脚本打进 ds-core-host.exe，core 是运行时 require 的，
+          # 必须随安装包放到 resources/app/packages/core，否则控制面起不来。
+          $repo = '${{ github.event.inputs.core_repo }}'
+          if ([string]::IsNullOrWhiteSpace($repo)) { $repo = 'baipinaaa/dev-sidecar-clean' }
+          $ref = '${{ github.event.inputs.core_ref }}'
+          if ([string]::IsNullOrWhiteSpace($ref)) { $ref = 'master' }
+          Write-Host "core 仓库 = $repo @ $ref"
+          git clone --depth 1 --filter=blob:none --sparse --branch $ref "https://github.com/$repo.git" core-src
+          if ($LASTEXITCODE -ne 0) { throw "clone $repo@$ref 失败" }
+          git -C core-src sparse-checkout set packages/core
+          npm install --omit=dev --no-audit --no-fund --prefix core-src/packages/core
+          if ($LASTEXITCODE -ne 0) { throw 'core 依赖安装失败' }
+
+      - name: 把 core 放进安装包资源目录
+        shell: pwsh
+        run: |
+          # 必须与 tauri.conf.json 的 bundle.resources（core-bundle/**）以及
+          # core-host 的解析路径（<安装目录>/resources/core-bundle/packages/core）对齐，
+          # 否则打进去也加载不到。
+          $dest = 'app/src-tauri/core-bundle/packages/core'
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          # 排除测试与缓存，避免把体积撑大
+          robocopy core-src/packages/core $dest /E /NFL /NDL /NJH /NJS `
+            /XD core-src/packages/core/test core-src/packages/core/.cache | Out-Null
+          if ($LASTEXITCODE -ge 8) { throw "robocopy 失败，退出码 $LASTEXITCODE" }
+          $size = [math]::Round(((Get-ChildItem $dest -Recurse -File | Measure-Object Length -Sum).Sum / 1MB), 1)
+          Write-Host "core 资源目录: $dest（${size} MB）"
+          Copy-Item core-src/packages/core/package.json $dest/package.json -Force
+          if (-not (Test-Path "$dest/package.json")) { throw 'core 的 package.json 不存在，require 会失败' }
+
+      - name: 冒烟 core-host（验证安装包形态能加载 core）
+        shell: pwsh
+        run: pwsh -File scripts/smoke-core-host.ps1
 
       - name: 安装前端依赖
         working-directory: app

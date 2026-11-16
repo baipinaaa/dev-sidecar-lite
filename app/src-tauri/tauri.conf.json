@@ -43,7 +43,8 @@
       "binaries/ds-core-host"
     ],
     "resources": [
-      "../../docs/*"
+      "../../docs/*",
+      "core-bundle/**"
     ],
     "windows": {
       "nsis": {

@@ -1,0 +1,1 @@
+安装包运行时资源目录：CI 会把 Node core（resources/app/packages/core）拷到这里。

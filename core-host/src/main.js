@@ -83,16 +83,39 @@ function tryRequire (dir) {
 }
 
 /**
+ * 安装目录（Tauri 打包后 sidecar 与 `resources/` 平级）。
+ *
+ * SEA 里 `__dirname` 不可靠（入口被打进 exe，路径是虚拟的），只能用 `process.execPath`。
+ */
+function installRoots () {
+  const exeDir = path.dirname(process.execPath)
+  return [
+    exeDir,
+    path.dirname(exeDir),
+    path.join(exeDir, '..', 'Resources'),
+  ]
+}
+
+/**
  * 解析 core 模块。
  *
- * 三种来源，按优先级：环境变量 → 已安装依赖 → 源码目录。
- * 之所以要三个，是因为开发期、SEA 打包、安装包三种布局完全不同。
+ * 四种来源，按优先级：环境变量 → 已安装依赖 → 源码目录 → **安装包的 resources/**。
+ * 最后一个是为了打包形态：SEA 只打入口脚本，core 是运行时才 require 的，
+ * 所以必须随安装包一起放到 `resources/app/packages/core`。
  */
 function resolveCore () {
+  const packaged = installRoots().flatMap((root) => [
+    // 当前布局：`app/src-tauri/core-bundle/**` 被打进 `$INSTDIR/resources/core-bundle/**`
+    path.join(root, 'resources', 'core-bundle', 'packages', 'core'),
+    // 旧布局（保留兼容）
+    path.join(root, 'resources', 'app', 'packages', 'core'),
+  ])
+
   const candidates = [
     process.env.DS_CORE_PATH,
     '@blue-frontier/dev-sidecar',
     path.join(__dirname, '../../dev-sidecar/packages/core'),
+    ...packaged,
   ].filter(Boolean)
 
   for (const candidate of candidates) {
@@ -109,10 +132,15 @@ function resolveCore () {
 }
 
 function resolveMitmproxyPath () {
+  const packaged = installRoots().map((root) =>
+    path.join(root, 'resources', 'app', 'packages', 'mitmproxy', 'src', 'index.js'),
+  )
+
   const candidates = [
     process.env.DS_MITMPROXY_PATH,
     path.join(__dirname, '../../dev-sidecar/packages/mitmproxy/src/index.js'),
     path.join(__dirname, '../../../dev-sidecar/packages/mitmproxy/src/index.js'),
+    ...packaged,
   ].filter(Boolean)
 
   for (const candidate of candidates) {

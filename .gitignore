@@ -9,3 +9,8 @@ app/src-tauri/icons/*.ico
 app/src-tauri/icons/*.png
 *.log
 crates/ds-types/tests/fixtures/running.json
+
+# Tauri 打包时由 CI 填入（Node core 及其依赖），体积大且随 core 版本变化
+app/src-tauri/resources/app/
+# CI 从 dev-sidecar 拉下来的 Node core，不入库
+app/src-tauri/core-bundle/
