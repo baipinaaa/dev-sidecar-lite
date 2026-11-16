@@ -84,8 +84,7 @@ function tryRequire (dir) {
   } catch (e) {
     // 记下真实原因：打包形态下最常见的是「core 在，但它依赖的某个包不在」，
     // 只抛一句"无法加载 core 模块"会让人以为是路径问题，白排查半天。
-    const message = String((e && e.message) || e).split('
-')[0]
+    const message = String((e && e.message) || e).split('\n')[0]
     requireErrors.push(`${dir} → ${message}`)
     return null
   }
@@ -122,7 +121,10 @@ function resolveCore () {
 
   throw new Error(
     '无法加载 core 模块。请设置 DS_CORE_PATH 指向 packages/core，或先 pnpm install 让 @blue-frontier/dev-sidecar 可用。\n' +
-    `已尝试: ${candidates.join(', ')}`,
+    `已尝试: ${candidates.join(', ')}
+` +
+    `失败原因:
+${requireErrors.map((line) => '  - ' + line).join('\n')}`,
   )
 }
 
