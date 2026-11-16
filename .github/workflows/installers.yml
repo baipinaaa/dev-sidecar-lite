@@ -32,13 +32,13 @@ on:
         default: 'master'
         type: string
       include_mitmproxy:
-        description: '是否一并打包 Node 引擎（mitmproxy）：false 更小，但 engine=node 回退不可用'
+        description: '是否一并打包 Node 引擎（mitmproxy）：需要 monorepo 依赖，一般保持 false'
         required: false
-        default: 'true'
+        default: 'false'
         type: choice
         options:
-          - 'true'
           - 'false'
+          - 'true'
   push:
     tags:
       - 'v*'
@@ -92,8 +92,10 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($repo)) { $repo = 'baipinaaa/dev-sidecar-clean' }
           $ref = '${{ github.event.inputs.core_ref }}'
           if ([string]::IsNullOrWhiteSpace($ref)) { $ref = 'master' }
-          # 默认一并打包 mitmproxy：core 顶层会引用它，缺了会直接 MODULE_NOT_FOUND
-          $withMitm = '${{ github.event.inputs.include_mitmproxy }}' -ne 'false'
+          # 默认不打包 mitmproxy：它的 package.json 用 `workspace:*` 引用 monorepo 内部包，
+          # 单独 npm install 会报 EUNSUPPORTEDPROTOCOL；而数据面已经是 Rust，
+          # mitmproxy 只在 proxy.engine=node 回退时才用。
+          $withMitm = '${{ github.event.inputs.include_mitmproxy }}' -eq 'true'
           Write-Host "core 仓库 = $repo @ $ref（mitmproxy: $withMitm）"
 
           $paths = @('packages/core')
@@ -112,6 +114,11 @@ jobs:
             }
             Push-Location $dir
             try {
+              if ($pkg -eq 'packages/mitmproxy') {
+                # monorepo 内部依赖用的是 pnpm 的 workspace:* 协议，npm 不支持，
+                # 这里把这类依赖从副本里剔掉再装（它运行时用 core-bundle 里的那份）。
+                node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));for(const k of Object.keys(p.dependencies||{})){if(String(p.dependencies[k]).startsWith('workspace:'))delete p.dependencies[k]};fs.writeFileSync('package.json',JSON.stringify(p,null,2))"
+              }
               npm install --omit=dev --no-audit --no-fund
               if ($LASTEXITCODE -ne 0) { throw "$pkg 依赖安装失败" }
             } finally {
