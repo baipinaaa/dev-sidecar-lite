@@ -26,6 +26,14 @@ import socket
 import sys
 import time
 
+# Windows 下被 Start-Process 重定向到文件时，stdout 默认是 cp1252，
+# 打印中文会直接 UnicodeEncodeError 崩掉（CI 上就踩了这个）。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
 sys.path.insert(0, __file__.rsplit("/", 1)[0].rsplit("\\", 1)[0])
 
 from ja3_from_pcap import CLIENT_HELLO, TLS_HANDSHAKE, find_client_hello, ja3, ja4_prefix, parse_client_hello  # noqa: E402

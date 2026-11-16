@@ -76,6 +76,7 @@ $port = 18000 + (Get-Random -Maximum 700)
 
 Write-Host "Chrome：$exe（$chromeVersion）" -ForegroundColor Cyan
 Write-Host "python：$py" -ForegroundColor Cyan
+$env:PYTHONIOENCODING = "utf-8"
 
 # 1) 起嗅探代理
 $rec = Start-Process -FilePath $py `
