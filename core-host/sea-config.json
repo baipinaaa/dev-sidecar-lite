@@ -1,5 +1,5 @@
 {
-  "main": "src/main.js",
+  "main": "dist/bundle.cjs",
   "output": "dist/ds-core-host.blob",
   "disableExperimentalSEAWarning": true,
   "useSnapshot": false,

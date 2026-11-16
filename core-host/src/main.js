@@ -15,6 +15,7 @@ const path = require('node:path')
 
 const { createHost, resolveDataDir } = require('./host')
 const { entryFor, resolveEngine, resolveRustProxyPath } = require('./engine')
+const runtime = require('./runtime')
 
 function parseArgs (argv) {
   const options = {
@@ -76,24 +77,11 @@ function printUsage () {
 
 function tryRequire (dir) {
   try {
-    return require(dir)
+    // SEA 里普通 require 只认内置模块，必须走 runtime 提供的磁盘 require
+    return runtime.requireFrom(dir)
   } catch (e) {
     return null
   }
-}
-
-/**
- * 安装目录（Tauri 打包后 sidecar 与 `resources/` 平级）。
- *
- * SEA 里 `__dirname` 不可靠（入口被打进 exe，路径是虚拟的），只能用 `process.execPath`。
- */
-function installRoots () {
-  const exeDir = path.dirname(process.execPath)
-  return [
-    exeDir,
-    path.dirname(exeDir),
-    path.join(exeDir, '..', 'Resources'),
-  ]
 }
 
 /**
@@ -104,7 +92,7 @@ function installRoots () {
  * 所以必须随安装包一起放到 `resources/app/packages/core`。
  */
 function resolveCore () {
-  const packaged = installRoots().flatMap((root) => [
+  const packaged = runtime.installRoots().flatMap((root) => [
     // 当前布局：`app/src-tauri/core-bundle/**` 被打进 `$INSTDIR/resources/core-bundle/**`
     path.join(root, 'resources', 'core-bundle', 'packages', 'core'),
     // 旧布局（保留兼容）
@@ -132,8 +120,8 @@ function resolveCore () {
 }
 
 function resolveMitmproxyPath () {
-  const packaged = installRoots().map((root) =>
-    path.join(root, 'resources', 'app', 'packages', 'mitmproxy', 'src', 'index.js'),
+  const packaged = runtime.installRoots().map((root) =>
+    path.join(root, 'resources', 'core-bundle', 'packages', 'mitmproxy', 'src', 'index.js'),
   )
 
   const candidates = [
@@ -150,7 +138,7 @@ function resolveMitmproxyPath () {
   }
 
   try {
-    return require.resolve('@blue-frontier/mitmproxy/src/index.js')
+    return runtime.requireFrom('@blue-frontier/mitmproxy/src/index.js')
   } catch (e) {
     return null
   }

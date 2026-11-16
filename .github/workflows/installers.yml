@@ -129,6 +129,11 @@ jobs:
           $size = [math]::Round(((Get-ChildItem $dest -Recurse -File | Measure-Object Length -Sum).Sum / 1MB), 1)
           Write-Host "core 资源目录: $dest（${size} MB）"
           Copy-Item core-src/packages/core/package.json $dest/package.json -Force
+
+          # shim 必须留在磁盘上（core 会 fork 它），不能打进 SEA
+          $shimDest = 'app/src-tauri/core-bundle/core-host/shim'
+          New-Item -ItemType Directory -Force -Path $shimDest | Out-Null
+          Copy-Item core-host/shim/*.js $shimDest -Force
           if (-not (Test-Path "$dest/package.json")) { throw 'core 的 package.json 不存在，require 会失败' }
 
           # robocopy 成功时返回 1（= 有文件被复制），Actions 会把最后一条原生命令的退出码

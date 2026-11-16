@@ -16,7 +16,26 @@
 const fs = require('node:fs')
 const path = require('node:path')
 
-const SHIM_PATH = path.join(__dirname, '../shim/rust-engine.js')
+const runtime = require('./runtime')
+
+/**
+ * shim 必须**留在磁盘上**（core 会 fork 它），不能打进 SEA。
+ * 打包后位于 `<安装目录>/resources/core-bundle/core-host/shim/rust-engine.js`。
+ */
+function resolveShimPath () {
+  const candidates = [
+    process.env.DS_resolveShimPath(),
+    ...runtime.findInResources('core-bundle', 'core-host', 'shim', 'rust-engine.js'),
+    path.join(__dirname, '..', 'shim', 'rust-engine.js'),
+  ].filter(Boolean)
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate
+    }
+  }
+  return path.join(__dirname, '..', 'shim', 'rust-engine.js')
+}
 
 /**
  * 找 `ds-proxy.exe`。
@@ -75,7 +94,7 @@ function resolveEngine ({ configured, rustPath }) {
  */
 function entryFor (engine, nodeEntry) {
   if (engine === 'rust') {
-    return SHIM_PATH
+    return resolveShimPath()
   }
   if (!nodeEntry) {
     throw new Error('Node 引擎入口缺失：请设置 DS_MITMPROXY_PATH')
@@ -84,7 +103,7 @@ function entryFor (engine, nodeEntry) {
 }
 
 module.exports = {
-  SHIM_PATH,
+  resolveShimPath,
   entryFor,
   resolveEngine,
   resolveRustProxyPath,

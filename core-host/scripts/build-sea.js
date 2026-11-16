@@ -25,13 +25,35 @@ const distDir = path.join(root, 'dist')
 const blobPath = path.join(distDir, 'ds-core-host.blob')
 const outPath = path.join(distDir, 'ds-core-host.exe')
 
-function run (command, args) {
+function run (command, args, extra = {}) {
   console.log(`$ ${command} ${args.join(' ')}`)
-  execFileSync(command, args, { stdio: 'inherit', cwd: root })
+  execFileSync(command, args, { stdio: 'inherit', cwd: root, ...extra })
 }
 
 function main () {
   fs.mkdirSync(distDir, { recursive: true })
+
+  // 0) 先打包成单文件。
+  //
+  // 必须这么做：SEA 入口里的 `require('./host')` 会报
+  // `ERR_UNKNOWN_BUILTIN_MODULE: No such built-in module: ./host`
+  // —— 内嵌入口的 require 只支持内置模块，不能加载同目录的其它源码文件。
+  // esbuild 把 host/dispatch/engine/runtime 全部内联，只把 core 与 mitmproxy
+  // 留成运行时 require（它们来自磁盘上的 resources/core-bundle）。
+  const npx = process.platform === 'win32' ? 'npx.cmd' : 'npx'
+  run(npx, [
+    '--yes',
+    'esbuild@0.24.0',
+    'src/main.js',
+    '--bundle',
+    '--platform=node',
+    '--format=cjs',
+    '--target=node20',
+    '--keep-names',
+    '--outfile=dist/bundle.cjs',
+    '--external:@blue-frontier/dev-sidecar',
+    '--external:@blue-frontier/mitmproxy',
+  ], { shell: process.platform === 'win32' })
 
   // 1) 生成 SEA blob
   run(process.execPath, ['--experimental-sea-config', path.join(root, 'sea-config.json')])
