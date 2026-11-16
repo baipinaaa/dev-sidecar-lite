@@ -67,13 +67,14 @@ fn main() {
             .set_alpn_protos(&[2, b'h', b'2', 8, b'h', b't', b't', b'p', b'/', b'1', b'.', b'1'])
             .expect("set_alpn_protos");
         builder.set_cipher_list(CHROME_CIPHERS).expect("set_cipher_list");
-        builder
-            .set_ciphersuites(CHROME_CIPHERSUITES)
-            .expect("set_ciphersuites");
-        builder.set_groups_list(CHROME_GROUPS).expect("set_groups_list");
-        // 65037（ECH）：Chrome 访问不支持 ECH 的站点也会发 grease
-        builder.set_enable_ech_grease(true);
-        println!("chrome 模式：套件/groups/ALPN/ECH-grease 已按 Chrome 156 配置");
+        // boring 5 的命名是 set_curves_list（不是 OpenSSL 3 的 set_groups_list）
+        builder.set_curves_list(CHROME_GROUPS).expect("set_curves_list");
+        // TLS1.3 套件用默认值（BoringSSL 默认就是 4865-4866-4867，与 Chrome 一致）；
+        // 65037（ECH grease）的开关在 SSL 对象上（SSL_set_enable_ech_grease），
+        // 需要 per-connection 设置，等 B1a 真正接入时再处理。
+        println!(
+            "chrome 模式：套件/TLS1.2+groups/ALPN 已按 Chrome 156 配置（TLS1.3 套件用默认）"
+        );
     }
 
     let connector = builder.build();
