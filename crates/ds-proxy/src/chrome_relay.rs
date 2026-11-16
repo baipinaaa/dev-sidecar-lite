@@ -15,6 +15,7 @@
 //! 阻塞线程用 50ms 读超时在「客户端→上游」与「上游→客户端」之间轮转，
 //! 超时是 `WouldBlock`/`TimedOut`（BoringSSL 对可重试 IO 是安全的），不是错误。
 
+use std::io::Read as _;
 use std::net::TcpStream;
 use std::time::Duration;
 

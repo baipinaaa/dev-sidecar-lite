@@ -59,7 +59,8 @@ rustls-native-certs = "0.8"
 # 结论见 docs/FINGERPRINT.md 与 docs/FINGERPRINT-B1.md）。构建需要 nasm + cmake，约 4 分钟。
 boring = "5"
 miniz_oxide = "0.8"
-foreign-types = "0.3"
+# 必须与 boring 内部使用的大版本一致（boring 5.5 用 0.5），否则 Ssl::as_ptr 拿不到
+foreign-types = "0.5"
 
 # --- DNS ---
 hickory-resolver = { version = "0.24", features = [

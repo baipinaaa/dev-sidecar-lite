@@ -73,7 +73,8 @@ fn build_connector() -> Result<SslConnector> {
     // 与 Node 版 `unVerifySslAgent` 等价：上游任意证书都接受。
     // 注意只用 `set_verify(NONE)` 不够 —— BoringSSL 仍会回 65（X509_V_ERR_...），
     // 必须给一个恒真的校验回调。
-    builder.set_verify_callback(SslVerifyMode::NONE, |_preverify_ok, _ctx| true)?;
+    // 注意：`set_verify_callback` 返回 `()`，不是 `Result`（boring 5.5.0 的签名如此）。
+    builder.set_verify_callback(SslVerifyMode::NONE, |_preverify_ok, _ctx| true);
 
     builder.set_cipher_list(CHROME_CIPHERS)?;
     builder.set_curves_list(CHROME_GROUPS)?;
