@@ -67,7 +67,10 @@ function Test-Target([string]$url, [int]$round) {
     $body = ""
     $code = "000"
     try {
-        $resp = & curl.exe -sS -o - -w "`n%{http_code}" --max-time 30 --ssl-no-revoke `
+                # -k 必须加：命中 intercepts 的域名会被 MITM，叶子证书由本地 CA 现签，
+        # curl 不认这个 CA，不加 -k 会在握手阶段被对端（curl）直接断开，
+        # 表现成 "tls handshake eof"，看着像我们的 TLS 栈坏了。
+        $resp = & curl.exe -sS -k -o - -w "`n%{http_code}" --max-time 30 --ssl-no-revoke `
             -x $proxy -A $UserAgent $url 2>$null
         $text = ($resp -join "`n")
         $idx = $text.LastIndexOf("`n")
