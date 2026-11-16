@@ -41,6 +41,7 @@ pub async fn relay<S>(
     origin: TcpStream,
     host: String,
     ech: Option<Vec<u8>>,
+    alpn_h2: bool,
     handle: &mut ConnHandle<'_>,
 ) -> Result<(u64, u64)>
 where
@@ -53,7 +54,7 @@ where
 
     // 阻塞线程：BoringSSL 握手 + 双向搬运。
     let origin_task = tokio::task::spawn_blocking(move || -> Result<(u64, u64)> {
-        let mut origin = ds_tls::chrome_connect(&host, origin, ech.as_deref())
+        let mut origin = ds_tls::chrome_connect(&host, origin, ech.as_deref(), alpn_h2)
             .with_context(|| format!("与 {host} 的上游 TLS 握手失败（Chrome 指纹通道）"))?;
         origin
             .get_ref()

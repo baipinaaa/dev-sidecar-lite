@@ -153,6 +153,17 @@ impl ResolvesServerCert for DynamicResolver {
 
 /// 构造 MITM 用的 `ServerConfig`（仅 HTTP/1.1）。
 pub fn mitm_server_config(authority: Arc<CertAuthority>) -> Result<Arc<rustls::ServerConfig>> {
+    mitm_server_config_with_alpn(authority, vec![b"http/1.1".to_vec()])
+}
+
+/// 构造 MITM 用的 `ServerConfig`，可自定义 ALPN。
+///
+/// 只有走 Chrome 指纹通道的域名才协商 `h2`：那条链路是纯字节中继、不解析 HTTP，
+/// 客户端说 h2 也没问题；而普通 rustls 通道要解析 HTTP/1.1 请求头，必须固定 http/1.1。
+pub fn mitm_server_config_with_alpn(
+    authority: Arc<CertAuthority>,
+    alpn: Vec<Vec<u8>>,
+) -> Result<Arc<rustls::ServerConfig>> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
 
     let mut config = rustls::ServerConfig::builder_with_provider(provider)
@@ -161,7 +172,7 @@ pub fn mitm_server_config(authority: Arc<CertAuthority>) -> Result<Arc<rustls::S
         .with_no_client_auth()
         .with_cert_resolver(Arc::new(DynamicResolver::new(authority)));
 
-    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    config.alpn_protocols = alpn;
 
     Ok(Arc::new(config))
 }
@@ -249,6 +260,15 @@ mod tests {
         let authority = Arc::new(CertAuthority::from_pem(&ca_pem, &ca_key_pem).unwrap());
         let config = mitm_server_config(authority).unwrap();
         assert_eq!(config.alpn_protocols, vec![b"http/1.1".to_vec()]);
+    }
+
+    #[test]
+    fn custom_alpn_is_applied() {
+        let (ca_pem, ca_key_pem) = generate_self_signed_ca("test CA").unwrap();
+        let authority = Arc::new(CertAuthority::from_pem(&ca_pem, &ca_key_pem).unwrap());
+        let config = mitm_server_config_with_alpn(authority, vec![b"h2".to_vec(), b"http/1.1".to_vec()])
+            .unwrap();
+        assert_eq!(config.alpn_protocols, vec![b"h2".to_vec(), b"http/1.1".to_vec()]);
     }
 
     #[test]

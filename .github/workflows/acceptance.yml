@@ -61,7 +61,9 @@ jobs:
             port = 31183
             enabled = $true
             intercepts = @{
-              'linux.do' = @{ '.*' = @{} }
+              # linux.do 走 Chrome 指纹通道（B1a）：验证 CF 是否还挑战
+              'linux.do' = @{ '.*' = @{ fingerprint = 'chrome' } }
+              '*.linux.do' = @{ '.*' = @{ fingerprint = 'chrome' } }
               '*.ldstatic.com' = @{ '.*' = @{} }
               'discord.com' = @{ '.*' = @{} }
               'huggingface.co' = @{ '.*' = @{} }

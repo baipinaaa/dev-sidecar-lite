@@ -30,7 +30,10 @@ const ESTABLISHED: &[u8] =
 /// MITM 运行所需的两套 TLS 配置。
 #[derive(Clone)]
 pub struct Mitm {
+    /// 普通通道：ALPN 只有 http/1.1（这条链路要解析 HTTP/1.1 请求头）。
     acceptor: TlsAcceptor,
+    /// Chrome 指纹通道：ALPN 有 h2，纯字节中继不解析 HTTP。
+    acceptor_h2: TlsAcceptor,
 }
 
 // tokio-rustls 的 TlsAcceptor / TlsConnector 没实现 Debug，这里只打印类型名。
@@ -52,7 +55,7 @@ impl Mitm {
             }
         };
 
-        let server_config = match ds_tls::ca::mitm_server_config(authority) {
+        let server_config = match ds_tls::ca::mitm_server_config(Arc::clone(&authority)) {
             Ok(config) => config,
             Err(err) => {
                 tracing::warn!("构建 MITM 服务端 TLS 配置失败，降级为纯隧道：{err:#}");
@@ -60,8 +63,21 @@ impl Mitm {
             }
         };
 
+        let server_config_h2 =
+            match ds_tls::ca::mitm_server_config_with_alpn(Arc::clone(&authority), vec![
+                b"h2".to_vec(),
+                b"http/1.1".to_vec(),
+            ]) {
+                Ok(config) => config,
+                Err(err) => {
+                    tracing::warn!("构建 h2 MITM 配置失败，指纹通道退化为 http/1.1：{err:#}");
+                    Arc::clone(&server_config)
+                }
+            };
+
         Some(Self {
             acceptor: TlsAcceptor::from(server_config),
+            acceptor_h2: TlsAcceptor::from(server_config_h2),
         })
     }
 }
@@ -176,24 +192,29 @@ pub async fn handle(
         .context("回写 200 Connection Established 失败")?;
     client.flush().await.ok();
 
+    let chrome = port == 443 && wants_chrome_fingerprint(&opts.config, &host);
+
     // 客户端可能把 ClientHello 和 CONNECT 同包发来，必须回灌给 TLS 层
     let prefixed = PrefixedStream::new(leftover, client);
 
-    let mut tls = mitm
-        .acceptor
+    // 指纹通道允许协商 h2；普通通道必须固定 http/1.1（要解析请求头）。
+    let acceptor = if chrome { &mitm.acceptor_h2 } else { &mitm.acceptor };
+    let mut tls = acceptor
         .accept(prefixed)
         .await
         .with_context(|| format!("与 {host} 的客户端 TLS 握手失败"))?;
 
     // 指纹通道：不解析 HTTP，握手完就把明文字节双向搬运。
-    if port == 443 && wants_chrome_fingerprint(&opts.config, &host) {
+    if chrome {
+        // 上游 ALPN 必须镜像客户端协商到的协议，否则中继的字节流对不上。
+        let alpn_h2 = tls.get_ref().1.alpn_protocol() == Some(b"h2".as_slice());
         let tcp = http::connect_upstream(&host, port).await?;
         let std_tcp = tcp.into_std().context("把上游连接切回阻塞模式失败")?;
         std_tcp.set_nonblocking(false).context("设置上游为阻塞模式失败")?;
         let ech = ech_bytes(&opts.config, &host).await;
         tracing::debug!("{host} 走 Chrome 指纹通道");
         // 中继内部已经调用 `handle.finish(up, down)` 记账。
-        return crate::chrome_relay::relay(tls, std_tcp, host, ech, handle)
+        return crate::chrome_relay::relay(tls, std_tcp, host, ech, alpn_h2, handle)
             .await
             .map(|_| ());
     }

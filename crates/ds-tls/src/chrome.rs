@@ -109,12 +109,22 @@ fn build_connector() -> Result<SslConnector> {
 ///
 /// `ech` 是 DoH 查到的 ECHConfigList 原始字节；有就发真 ECH，没有就只发 ECH grease
 /// （Chrome 在拿不到配置时也是这么做的）。
-pub fn chrome_connect(host: &str, tcp: TcpStream, ech: Option<&[u8]>) -> Result<SslStream<TcpStream>> {
+pub fn chrome_connect(
+    host: &str,
+    tcp: TcpStream,
+    ech: Option<&[u8]>,
+    alpn_h2: bool,
+) -> Result<SslStream<TcpStream>> {
     let _ = tcp.set_nodelay(true);
 
     let connector = connector()?;
     let configuration = connector.configure()?;
     let mut ssl = configuration.into_ssl(host)?;
+
+    // ALPN 必须与客户端实际协商到的协议一致：中继是纯字节搬运，
+    // 客户端说 HTTP/1.1 而上游说 h2 会让对端按 h2 帧解析，直接乱码。
+    let alpn: &[u8] = if alpn_h2 { b"h2" } else { b"http/1.1" };
+    ssl.set_alpn_protos(alpn)?;
 
     // 扩展 65037（encrypted_client_hello）。grease 与真 ECH 不冲突：
     // ZlibDecompressor 之外，grease 保证"即使没有配置也带这个扩展"。

@@ -59,7 +59,7 @@ fn main() {
     let tcp = TcpStream::connect(addr).expect("连接本地监听失败");
     // 握手会失败（对端不发 ServerHello），这里只关心"发出去了什么"。
     // 但如果连 ClientHello 都没发出来，失败原因就是唯一线索，必须打出来。
-    if let Err(err) = ds_tls::chrome_connect(&host, tcp, None) {
+    if let Err(err) = ds_tls::chrome_connect(&host, tcp, None, true) {
         eprintln!("握手未完成（预期，对端不回 ServerHello）：{err:#}");
     }
 
