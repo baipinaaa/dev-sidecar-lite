@@ -2,7 +2,7 @@ name: boring-probe
 
 # B1 可行性探针（docs/FINGERPRINT-B1.md 第六节）。只回答三个问题，不改仓库里的任何 crate：
 #   1) `boring`（BoringSSL 绑定）在 windows-latest 上能不能构建、耗时多少；
-#   2) crate 里有没有 ECH 相关绑定（grep 源码里的 ech_config）；
+#   2) crate 里有没有 ECH 相关绑定（boring 的 Rust 层 / BoringSSL 头文件 / bindgen 产物）；
 #   3) 用它握手一次，抓 ClientHello 算 JA3，能不能对上 Chrome 156 的 cccf4f8d2e3c9bded07b40c216fe6216。
 # 三个都正向才进入 B1a；否则转 B1b（wreq）或 B1c（维持 rustls）。
 
@@ -32,8 +32,8 @@ jobs:
           # BoringSSL 需要 nasm 汇编器；cmake 与 ninja 在 runner 上自带
           if (-not (Get-Command nasm -ErrorAction SilentlyContinue)) {
             choco install nasm -y --no-progress | Out-Null
-            "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Append
-            $env:PATH = "C:\Program Files\NASM;$env:PATH"
+            "C:/Program Files/NASM" | Out-File -FilePath $env:GITHUB_PATH -Append
+            $env:PATH = "C:/Program Files/NASM;$env:PATH"
           }
           nasm -v
           cmake --version | Select-Object -First 1
@@ -47,50 +47,10 @@ jobs:
           "PROBE_DIR=$dst" | Out-File -FilePath $env:GITHUB_ENV -Append
           Get-ChildItem -Recurse $dst | Select-Object FullName
 
-      - name: 问题 2 —— crate 里有没有 ECH 绑定
-        shell: pwsh
-        run: |
-          Push-Location $env:PROBE_DIR
-          cargo fetch 2>&1 | Out-String | Write-Host
-          $reg = Join-Path $env:USERPROFILE ".cargo\registry\src"
-          $boringDirs = Get-ChildItem -Path $reg -Directory -Filter "boring-*" -ErrorAction SilentlyContinue
-          if (-not $boringDirs) {
-            Write-Host "::error::没有找到 boring 源码目录（cargo fetch 可能未成功）"
-            Pop-Location
-            exit 1
-          }
-          Write-Host "=== boring 版本 ==="
-          $boringDirs | ForEach-Object { Write-Host $_.Name }
-          Write-Host "=== 含 ech 的 Rust 绑定（最多 40 行）==="
-          $hits = Get-ChildItem -Path $boringDirs[0].FullName -Recurse -Include *.rs -ErrorAction SilentlyContinue |
-            Select-String -Pattern 'ech_config|set1_ech|ech_grease|EchConfig' -CaseSensitive:$false
-          if ($hits) {
-            $hits | Select-Object -First 40 | ForEach-Object {
-              Write-Host ("{0}:{1}: {2}" -f $_.Filename, $_.LineNumber, $_.Line.Trim())
-            }
-          } else {
-            Write-Host "（没有任何匹配 —— crate 未暴露 ECH）"
-          }
-          Write-Host "=== boring-sys 里的 C 符号 ==="
-          $sysDirs = Get-ChildItem -Path $reg -Directory -Filter "boring-sys-*" -ErrorAction SilentlyContinue
-          if ($sysDirs) {
-            $sysHits = Get-ChildItem -Path $sysDirs[0].FullName -Recurse -Include *.rs,*.h -ErrorAction SilentlyContinue |
-              Select-String -Pattern 'SSL_set1_ech_config_list|SSL_set_ech|ech_config' -CaseSensitive:$false
-            if ($sysHits) {
-              $sysHits | Select-Object -First 20 | ForEach-Object {
-                Write-Host ("{0}:{1}: {2}" -f $_.Filename, $_.LineNumber, $_.Line.Trim())
-              }
-            } else {
-              Write-Host "（boring-sys 也没有该符号）"
-            }
-          }
-          Pop-Location
-
       - name: 问题 1 —— 构建耗时
         shell: pwsh
         run: |
           Push-Location $env:PROBE_DIR
-          cargo clean -q
           $sw = [System.Diagnostics.Stopwatch]::StartNew()
           cargo build --release 2>&1 | Out-String | Write-Host
           $code = $LASTEXITCODE
@@ -102,6 +62,60 @@ jobs:
           if ($code -ne 0) {
             Write-Host "::error::boring 构建失败（见上方日志）"
             exit 1
+          }
+
+      - name: 问题 2 —— crate 里有没有 ECH 绑定
+        shell: pwsh
+        run: |
+          # cargo fetch 只下 .crate，源码要等构建时才解压到 registry/src；
+          # bindgen 产物在 target/<profile>/build/boring-sys-*/out/ 下，是最权威的答案。
+          $reg = Join-Path (Join-Path $env:USERPROFILE ".cargo") "registry/src"
+          $boringDirs = @(Get-ChildItem -Path $reg -Directory -Filter "boring-*" -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -notlike "boring-sys-*" })
+          if ($boringDirs.Count -eq 0) {
+            Write-Host "::warning::registry/src 里没有 boring 源码"
+          } else {
+            foreach ($d in $boringDirs) {
+              Write-Host "=== $($d.Name)：含 ech 的 Rust 绑定 ==="
+              $hits = @(Get-ChildItem -Path $d.FullName -Recurse -Include *.rs -ErrorAction SilentlyContinue |
+                Select-String -Pattern 'ech_config|set1_ech|ech_grease|EchConfig' -CaseSensitive:$false)
+              if ($hits.Count -gt 0) {
+                $hits | Select-Object -First 30 | ForEach-Object {
+                  Write-Host ("  {0}:{1}: {2}" -f $_.Filename, $_.LineNumber, $_.Line.Trim())
+                }
+              } else {
+                Write-Host "  （无）"
+              }
+            }
+          }
+
+          Write-Host "=== BoringSSL 头文件里的 ECH C API ==="
+          $sysDirs = @(Get-ChildItem -Path $reg -Directory -Filter "boring-sys-*" -ErrorAction SilentlyContinue)
+          if ($sysDirs.Count -gt 0) {
+            $sysHits = @(Get-ChildItem -Path $sysDirs[0].FullName -Recurse -Include *.h -ErrorAction SilentlyContinue |
+              Select-String -Pattern 'SSL_set1_ech_config_list|SSL_ech|ech_config_list' -CaseSensitive:$false)
+            if ($sysHits.Count -gt 0) {
+              $sysHits | Select-Object -First 20 | ForEach-Object {
+                Write-Host ("  {0}:{1}: {2}" -f $_.Filename, $_.LineNumber, $_.Line.Trim())
+              }
+            } else {
+              Write-Host "  （头文件里没有该符号）"
+            }
+          } else {
+            Write-Host "  （registry/src 里没有 boring-sys 源码）"
+          }
+
+          Write-Host "=== bindgen 生成的绑定（权威）==="
+          $bindings = @(Get-ChildItem -Path (Join-Path $env:PROBE_DIR "target") -Recurse -Filter "bindings.rs" -ErrorAction SilentlyContinue)
+          if ($bindings.Count -gt 0) {
+            $bHits = @($bindings | Select-String -Pattern 'ech' -CaseSensitive:$false)
+            if ($bHits.Count -gt 0) {
+              $bHits | Select-Object -First 30 | ForEach-Object { Write-Host ("  " + $_.Line.Trim()) }
+            } else {
+              Write-Host "  （bindings.rs 里没有任何 ech 符号）"
+            }
+          } else {
+            Write-Host "  （没找到 bindings.rs）"
           }
 
       - name: 问题 3 —— 用 boring 握手一次并抓 ClientHello
@@ -124,8 +138,10 @@ jobs:
           if ($rec -and -not $rec.HasExited) { Stop-Process -Id $rec.Id -Force -ErrorAction SilentlyContinue }
 
           if (-not (Test-Path $out)) {
-            Write-Host "--- recorder stdout ---"; Get-Content $recLog -ErrorAction SilentlyContinue | Write-Host
-            Write-Host "--- recorder stderr ---"; Get-Content $recErr -ErrorAction SilentlyContinue | Write-Host
+            Write-Host "--- recorder stdout ---"
+            Get-Content $recLog -ErrorAction SilentlyContinue | Write-Host
+            Write-Host "--- recorder stderr ---"
+            Get-Content $recErr -ErrorAction SilentlyContinue | Write-Host
             Write-Host "::error::没有抓到 ClientHello"
             exit 1
           }
