@@ -44,7 +44,7 @@
     ],
     "resources": [
       "../../docs/*",
-      "core-bundle/**"
+      "core-bundle/**/*"
     ],
     "windows": {
       "nsis": {
