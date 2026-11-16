@@ -1,31 +1,38 @@
 #!/usr/bin/env python3
-"""真浏览器验收：用 Chrome/Edge headless 走本地代理访问目标站，读 netlog 判状态码。
+"""真浏览器验收：Chrome headless + CDP，读导航响应的状态码与页面正文。
 
 为什么不用 curl：Cloudflare 的 Bot Management 不只看 TLS 指纹，还看 HTTP/2
 SETTINGS/帧顺序（peetprint）、header 顺序、UA。curl 的 h2 指纹与 Chrome 天差地别，
 用 curl 测「指纹通道是否骗过 CF」永远得到 403，测不出通道本身好不好。
 
-用法：
-    python tests/e2e/browser_acceptance.py --chrome <chrome.exe> --port 31183 \
-        --urls https://linux.do/ https://discord.com/ --rounds 2 --out report.md
+为什么不用 `--dump-dom`：Chrome 132 起该参数被移除；netlog 里的 `response_info`
+在 `--net-log-capture-mode=Default` 下也不落盘（实测 events 3k+ 但零命中）。
+所以走 DevTools 协议：导航后读 `performance.getEntriesByType('navigation')[0].responseStatus`
+和 `document.body.innerText`，一次拿到「状态码 + 是不是挑战页」。
 
-判定：文档请求的 `status_code` 200 且页面不是挑战页 → PASS。
-netlog 是 Chrome 的 JSON 事件流，`status_code` 与 `url` 出现在同一条 URL_REQUEST 事件里，
-这里按「url 出现位置往后 3000 字符内找最后一个 status_code」的启发式解析（够用且不依赖库）。
+WS 客户端是手写的（RFC6455 客户端帧，掩码 + 分片重组），不引第三方库。
+
+用法：
+    python tests/e2e/browser_acceptance.py --port 31183 \
+        --urls https://linux.do/ https://discord.com/ --rounds 2 --out report.md
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
 import io
 import json
 import os
-import re
 import shutil
+import socket
+import struct
 import subprocess
 import sys
 import tempfile
 import time
+from urllib.parse import urlparse
+from urllib.request import urlopen
 
 sys.stdout.reconfigure(encoding="utf-8")
 
@@ -33,9 +40,102 @@ CHROME_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36"
 )
-CHALLENGE_MARKERS = ("Just a moment", "请稍候", "cf-browser-verification", "challenge-platform")
+CHALLENGE_MARKERS = ("Just a moment", "请稍候", "cf-browser-verification", "challenge-platform", "Attention Required")
 
 
+# --------------------------------------------------------------------------- WS
+class Ws:
+    """最小 WebSocket 客户端：只处理文本帧 + ping/pong + 分片。"""
+
+    def __init__(self, url: str, timeout: float = 15.0):
+        parsed = urlparse(url)
+        self.sock = socket.create_connection((parsed.hostname, parsed.port), timeout=timeout)
+        key = base64.b64encode(os.urandom(16)).decode()
+        request = (
+            f"GET {parsed.path} HTTP/1.1\r\n"
+            f"Host: {parsed.hostname}:{parsed.port}\r\n"
+            "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        )
+        self.sock.sendall(request.encode())
+        buffer = b""
+        while b"\r\n\r\n" not in buffer:
+            chunk = self.sock.recv(4096)
+            if not chunk:
+                raise RuntimeError("WebSocket 握手被关闭")
+            buffer += chunk
+        head, self.pending = buffer.split(b"\r\n\r\n", 1)
+        if b"101" not in head.split(b"\r\n")[0]:
+            raise RuntimeError(f"WebSocket 握手失败: {head[:120]!r}")
+
+    def _read(self, n: int) -> bytes:
+        while len(self.pending) < n:
+            chunk = self.sock.recv(65536)
+            if not chunk:
+                raise RuntimeError("WebSocket 连接被关闭")
+            self.pending += chunk
+        out, self.pending = self.pending[:n], self.pending[n:]
+        return out
+
+    def send(self, text: str) -> None:
+        payload = text.encode()
+        mask = os.urandom(4)
+        header = bytearray([0x81])
+        size = len(payload)
+        if size < 126:
+            header.append(0x80 | size)
+        elif size < 65536:
+            header.append(0x80 | 126)
+            header += struct.pack(">H", size)
+        else:
+            header.append(0x80 | 127)
+            header += struct.pack(">Q", size)
+        header += mask
+        masked = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+        self.sock.sendall(bytes(header) + masked)
+
+    def recv(self) -> str:
+        fragments: list[bytes] = []
+        while True:
+            first, second = self._read(2)
+            fin = first & 0x80
+            opcode = first & 0x0F
+            size = second & 0x7F
+            if size == 126:
+                size = struct.unpack(">H", self._read(2))[0]
+            elif size == 127:
+                size = struct.unpack(">Q", self._read(8))[0]
+            payload = self._read(size) if size else b""
+            if opcode == 0x9:  # ping
+                self.sock.sendall(b"\x8a\x80" + os.urandom(4))
+                continue
+            if opcode == 0x8:  # close
+                raise RuntimeError("WebSocket 被对端关闭")
+            fragments.append(payload)
+            if fin:
+                return b"".join(fragments).decode("utf-8", errors="replace")
+
+    def call(self, msg_id: int, method: str, params: dict | None = None, timeout: float = 20.0) -> dict:
+        self.sock.settimeout(timeout)
+        body = {"id": msg_id, "method": method}
+        if params:
+            body["params"] = params
+        self.send(json.dumps(body))
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            message = json.loads(self.recv())
+            if message.get("id") == msg_id:
+                return message
+        raise TimeoutError(f"CDP {method} 超时")
+
+    def close(self) -> None:
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
+# ------------------------------------------------------------------------ chrome
 def find_chrome(explicit: str | None) -> str | None:
     if explicit:
         return explicit if os.path.exists(explicit) else None
@@ -55,139 +155,127 @@ def find_chrome(explicit: str | None) -> str | None:
     return None
 
 
-def run_once(chrome: str, proxy_port: int, url: str, budget_ms: int, debug: bool = False) -> dict:
+def launch(chrome: str, proxy_port: int) -> tuple[subprocess.Popen, str]:
     workdir = tempfile.mkdtemp(prefix="ds-browser-")
     profile = os.path.join(workdir, "profile")
-    netlog = os.path.join(workdir, "netlog.json")
-    args = [
-        chrome,
-        "--headless=new",
-        "--disable-gpu",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--disable-extensions",
-        "--disable-background-networking",
-        "--ignore-certificate-errors",
-        f"--user-data-dir={profile}",
-        f"--proxy-server=http://127.0.0.1:{proxy_port}",
-        f"--user-agent={CHROME_UA}",
-        f"--log-net-log={netlog}",
-        "--net-log-capture-mode=Default",
-        f"--virtual-time-budget={budget_ms}",
-        url,
-    ]
-    started = time.time()
+    os.makedirs(profile, exist_ok=True)
+    process = subprocess.Popen(
+        [
+            chrome,
+            "--headless=new",
+            "--disable-gpu",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-extensions",
+            "--disable-background-networking",
+            "--disable-features=Translate",
+            "--ignore-certificate-errors",
+            "--remote-debugging-port=0",
+            f"--user-data-dir={profile}",
+            f"--proxy-server=http://127.0.0.1:{proxy_port}",
+            f"--user-agent={CHROME_UA}",
+            "about:blank",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    port_file = os.path.join(profile, "DevToolsActivePort")
+    for _ in range(120):
+        if os.path.exists(port_file):
+            content = io.open(port_file, encoding="utf-8").read().splitlines()
+            if content and content[0].strip().isdigit():
+                return process, content[0].strip()
+        time.sleep(0.25)
+    process.kill()
+    raise RuntimeError("Chrome 没写出 DevToolsActivePort（远程调试没起来）")
+
+
+def open_tab(port: str) -> str:
+    reply = urlopen(f"http://127.0.0.1:{port}/json/new?about:blank", timeout=10).read()
+    return json.loads(reply)["webSocketDebuggerUrl"]
+
+
+def probe_url(devtools_port: str, url: str, budget_s: float = 20.0) -> dict:
+    ws = Ws(open_tab(devtools_port))
+    result = {"url": url, "status": None, "title": "", "text": "", "challenge": False}
     try:
-        subprocess.run(args, capture_output=True, timeout=max(30, budget_ms // 1000 + 30))
-    except subprocess.TimeoutExpired:
-        pass
-    elapsed = time.time() - started
-
-    result = {
-        "url": url,
-        "elapsed_ms": int(elapsed * 1000),
-        "status": None,
-        "host": re.sub(r"^https?://", "", url).split("/")[0],
-        "netlog_bytes": 0,
-    }
-    if not os.path.exists(netlog):
-        shutil.rmtree(workdir, ignore_errors=True)
-        return result
-
-    raw = io.open(netlog, encoding="utf-8", errors="replace").read()
-    result["netlog_bytes"] = len(raw)
-    shutil.rmtree(workdir, ignore_errors=True)
-
-    result["status"] = parse_netlog(raw, result["host"], debug=debug)
-    return result
-
-
-def parse_netlog(raw: str, host: str, debug: bool = False) -> int | None:
-    """从 netlog 里取该 host 文档请求的最终状态码。
-
-    netlog 结构：`{"constants":..., "events":[{"source":{"id":..},"params":{...}}]}`
-    `params.url` 与 `params.response_info.status_code` 可能落在同一条 URL_REQUEST 事件里，
-    也可能分散在不同 phase 的事件里（靠 `source.id` 关联），所以先建 id→url 映射再回填。
-    解析失败时退化为正则（兼容 `"status_code": 200` 这种带空格的格式）。
-    """
-    try:
-        data = json.loads(raw)
-    except Exception as err:  # noqa: BLE001 - netlog 偶尔被截断
-        if debug:
-            print(f"  [debug] netlog 不是合法 JSON：{err}；改用正则")
-        codes = re.findall(r'"status_code"\s*:\s*(\d+)', raw)
-        return int(codes[-1]) if codes else None
-
-    events = data.get("events") or []
-    url_by_source: dict[int, str] = {}
-    for event in events:
-        params = event.get("params") or {}
-        url = params.get("url")
-        source_id = (event.get("source") or {}).get("id")
-        if isinstance(url, str) and source_id is not None:
-            url_by_source[source_id] = url
-
-    found: list[tuple[str, int]] = []
-    for event in events:
-        params = event.get("params") or {}
-        info = params.get("response_info") or {}
-        code = info.get("status_code")
-        if not isinstance(code, int):
-            continue
-        source_id = (event.get("source") or {}).get("id")
-        url = url_by_source.get(source_id) or params.get("url")
-        if isinstance(url, str) and host in url:
-            found.append((url, code))
-
-    if debug:
-        print(f"  [debug] events={len(events)} 命中={found[-4:]}")
-
-    return found[-1][1] if found else None
+        ws.call(1, "Page.enable")
+        ws.call(2, "Runtime.enable")
+        ws.call(3, "Page.navigate", {"url": url})
+        deadline = time.time() + budget_s
+        expression = (
+            "JSON.stringify({"
+            "s:(performance.getEntriesByType('navigation')[0]||{}).responseStatus,"
+            "t:document.title,"
+            "b:document.body?document.body.innerText.slice(0,300):''})"
+        )
+        while time.time() < deadline:
+            time.sleep(0.6)
+            reply = ws.call(10, "Runtime.evaluate", {"expression": expression, "returnByValue": True})
+            raw = ((reply.get("result") or {}).get("result") or {}).get("value")
+            if not raw:
+                continue
+            data = json.loads(raw)
+            result["status"] = data.get("s")
+            result["title"] = (data.get("t") or "").strip()[:80]
+            result["text"] = (data.get("b") or "").strip()[:300]
+            if result["status"]:
+                break
+        joined = f"{result['title']} {result['text']}"
+        result["challenge"] = any(marker in joined for marker in CHALLENGE_MARKERS)
+    finally:
+        ws.close()
     return result
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--chrome", default=None)
-    ap.add_argument("--port", type=int, required=True)
+    ap.add_argument("--port", type=int, required=True, help="ds-proxy 的监听端口")
     ap.add_argument("--urls", nargs="+", required=True)
     ap.add_argument("--rounds", type=int, default=2)
-    ap.add_argument("--budget-ms", type=int, default=12000)
+    ap.add_argument("--budget", type=float, default=20.0)
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
     chrome = find_chrome(args.chrome)
     if chrome is None:
-        print("跳过：找不到 Chrome/Edge，浏览器验收只能在本机或有浏览器的 runner 上跑")
+        print("跳过：找不到 Chrome/Edge，浏览器验收只能在有浏览器的机器上跑")
         return 0
     print(f"浏览器：{chrome}")
 
     rows = []
     for rnd in range(1, args.rounds + 1):
-        for url in args.urls:
-            res = run_once(chrome, args.port, url, args.budget_ms, debug=True)
-            ok = res["status"] == 200
-            verdict = "PASS" if ok else "FAIL"
-            print(
-                f"[{verdict}] 第{rnd}轮 {url} -> {res['status']} / {res['elapsed_ms']}ms"
-                f" / netlog {res['netlog_bytes']} 字节"
-            )
-            rows.append({"round": rnd, "ok": ok, **res})
+        process = None
+        try:
+            process, devtools_port = launch(chrome, args.port)
+            for url in args.urls:
+                res = probe_url(devtools_port, url, args.budget)
+                ok = res["status"] == 200 and not res["challenge"]
+                extra = "挑战页" if res["challenge"] else "正常"
+                print(
+                    f"[{'PASS' if ok else 'FAIL'}] 第{rnd}轮 {url} -> "
+                    f"{res['status']} / {extra} / 标题 {res['title']!r}"
+                )
+                rows.append({"round": rnd, "ok": ok, **res})
+        finally:
+            if process is not None:
+                process.kill()
 
     if args.out:
-        lines = ["| 目标 | 通过 | 平均耗时 | 状态码 |", "| --- | --- | --- | --- |"]
+        lines = ["| 目标 | 通过 | 状态码 | 挑战页 |", "| --- | --- | --- | --- |"]
         for url in args.urls:
             subset = [r for r in rows if r["url"] == url]
             passed = sum(1 for r in subset if r["ok"])
-            avg = sum(r["elapsed_ms"] for r in subset) // max(1, len(subset))
             codes = ",".join(str(r["status"]) for r in subset)
-            lines.append(f"| {url} | {passed}/{len(subset)} | {avg}ms | {codes} |")
+            challenged = sum(1 for r in subset if r["challenge"])
+            lines.append(f"| {url} | {passed}/{len(subset)} | {codes} | {challenged} |")
         io.open(args.out, "w", encoding="utf-8", newline="\n").write("\n".join(lines) + "\n")
 
     failed = [r for r in rows if not r["ok"]]
     print("=== 结论 ===")
-    for r in rows:
-        print(f"{r['url']} 第{r['round']}轮 {'通过' if r['ok'] else '失败'} 状态码 {r['status']}")
+    for row in rows:
+        print(f"{row['url']} 第{row['round']}轮 {'通过' if row['ok'] else '失败'} 状态码 {row['status']} 挑战 {row['challenge']}")
     return 1 if failed else 0
 
 
