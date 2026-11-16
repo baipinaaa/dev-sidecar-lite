@@ -115,8 +115,14 @@ function installRoots () {
  * @param {{ mitmproxy?: string, core?: string }} dirs
  */
 let aliasesInstalled = false
+let aliasDirs = {}
 
 function installPackageAliases (dirs = {}) {
+  // 每次都覆盖映射目标：
+  // resolveCore() 会按候选顺序逐个试，先试到不存在的目录时如果就此把映射固定下来，
+  // 后面真正的 core-bundle 就再也解析不到了（线上踩过：报
+  // `Cannot find module '@blue-frontier/mitmproxy/src/json'`）。
+  aliasDirs = dirs
   if (aliasesInstalled) {
     return
   }
@@ -130,7 +136,7 @@ function installPackageAliases (dirs = {}) {
       const slash = rest.indexOf('/')
       const name = slash === -1 ? rest : rest.slice(0, slash)
       const sub = slash === -1 ? '' : rest.slice(slash)
-      const dir = name === 'mitmproxy' ? dirs.mitmproxy : (name === 'dev-sidecar' ? dirs.core : null)
+      const dir = name === 'mitmproxy' ? aliasDirs.mitmproxy : (name === 'dev-sidecar' ? aliasDirs.core : null)
       if (dir) {
         return originalResolve.call(this, path.join(dir, sub), parent, isMain, options)
       }
