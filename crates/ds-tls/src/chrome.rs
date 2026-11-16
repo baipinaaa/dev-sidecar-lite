@@ -76,8 +76,18 @@ fn build_connector() -> Result<SslConnector> {
     // 注意：`set_verify_callback` 返回 `()`，不是 `Result`（boring 5.5.0 的签名如此）。
     builder.set_verify_callback(SslVerifyMode::NONE, |_preverify_ok, _ctx| true);
 
-    builder.set_cipher_list(CHROME_CIPHERS)?;
-    builder.set_curves_list(CHROME_GROUPS)?;
+    // 套件表 / 曲线表都做「失败即降级」：BoringSSL 的构建开关会决定某些名字是否被接受
+    // （例如未启用 ML-KEM 时 `X25519MLKEM768` 会报错）。降级只影响指纹精度，不该让
+    // 整条通道不可用；降级原因打到 stderr，CI 日志里能直接看到。
+    if let Err(err) = builder.set_cipher_list(CHROME_CIPHERS) {
+        eprintln!("[ds-tls] 警告: Chrome 套件表被拒绝（{err}），改用 BoringSSL 默认套件");
+    }
+    if let Err(err) = builder.set_curves_list(CHROME_GROUPS) {
+        eprintln!("[ds-tls] 警告: `{CHROME_GROUPS}` 被拒绝（{err}），退回 X25519:P-256:P-384");
+        builder
+            .set_curves_list("X25519:P-256:P-384")
+            .map_err(|e| anyhow!("设置 supported_groups 失败: {e}"))?;
+    }
     builder.set_alpn_protos(CHROME_ALPN)?;
 
     // Chrome 的扩展顺序是随机的；不开这个，JA4 一致但 JA3 会固定成一个非 Chrome 的值。
@@ -88,7 +98,9 @@ fn build_connector() -> Result<SslConnector> {
     builder.enable_signed_cert_timestamps();
 
     // 扩展 27（compress_certificate）。
-    let _ = builder.add_certificate_compression_algorithm(ZlibDecompressor);
+    if let Err(err) = builder.add_certificate_compression_algorithm(ZlibDecompressor) {
+        eprintln!("[ds-tls] 警告: 注册 zlib 证书压缩失败（{err}），JA4 会少扩展 27");
+    }
 
     Ok(builder.build())
 }

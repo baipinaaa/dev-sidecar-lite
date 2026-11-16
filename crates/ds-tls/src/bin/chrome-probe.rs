@@ -58,9 +58,16 @@ fn main() {
 
     let tcp = TcpStream::connect(addr).expect("连接本地监听失败");
     // 握手会失败（对端不发 ServerHello），这里只关心"发出去了什么"。
-    let _ = ds_tls::chrome_connect(&host, tcp, None);
+    // 但如果连 ClientHello 都没发出来，失败原因就是唯一线索，必须打出来。
+    if let Err(err) = ds_tls::chrome_connect(&host, tcp, None) {
+        eprintln!("握手未完成（预期，对端不回 ServerHello）：{err:#}");
+    }
 
     let size = recorder.join().expect("采集线程 panic");
     println!("captured {size} bytes -> {out_path}");
+    if size == 0 {
+        eprintln!("没有抓到任何字节：说明 chrome_connect 在发 ClientHello 之前就失败了，看上面的错误");
+        std::process::exit(2);
+    }
     println!("next: python tests/e2e/clienthello_capture.py --compute {out_path}");
 }
