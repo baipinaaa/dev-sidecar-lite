@@ -106,7 +106,11 @@ jobs:
         if: always()
         shell: pwsh
         run: |
-          Get-ChildItem -Recurse -Include *.exe,*.msi,*.sig -Path app/src-tauri/target |
+          if (-not (Test-Path 'app/src-tauri/target')) {
+            Write-Host '没有 target 目录（打包未走到这一步）'
+            exit 0
+          }
+          Get-ChildItem -Recurse -Include *.exe,*.msi,*.sig -Path app/src-tauri/target -ErrorAction SilentlyContinue |
             Where-Object { $_.FullName -like '*bundle*' } |
             Select-Object @{n='文件';e={$_.Name}}, @{n='大小MB';e={[math]::Round($_.Length/1MB,1)}} |
             Format-Table -AutoSize
