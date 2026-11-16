@@ -38,12 +38,17 @@ function Resolve-Chrome {
 
 # 用 headless 抓页面；--dump-dom 会把渲染后的 DOM 打到 stdout
 function Get-Dom([string]$exe, [string]$url, [string]$profile) {
+    # UA 必须伪装成非 headless：headless UA 会被 CF 直接挑战，
+    # 而 UA 只影响 HTTP 层，测的仍是我们关心的 TLS 层指纹。
+    $ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36"
     $args = @(
         "--headless=new",
         "--disable-gpu",
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-extensions",
+        "--disable-blink-features=AutomationControlled",
+        "--user-agent=$ua",
         "--user-data-dir=$profile",
         "--virtual-time-budget=15000",
         "--dump-dom",
@@ -99,6 +104,10 @@ foreach ($url in $Endpoints) {
         if (-not $dom) { Start-Sleep -Seconds 2; continue }
         $json = Extract-Json $dom
         if (-not $json) {
+            $head = $dom.Substring(0, [Math]::Min(400, $dom.Length))
+            Write-Host "没解析出 JSON（dump 长度 $($dom.Length)），前 400 字符：" -ForegroundColor Yellow
+            Write-Host $head -ForegroundColor DarkGray
+            $dom | Out-File -FilePath (Join-Path $OutDir ("dump-" + [guid]::NewGuid().ToString("N").Substring(0, 6) + ".html")) -Encoding utf8
             Start-Sleep -Seconds 2
             continue
         }
