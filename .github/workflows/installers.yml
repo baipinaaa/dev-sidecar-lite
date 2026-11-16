@@ -8,8 +8,11 @@ name: installers
 #   3. app/（Tauri 2 壳）  —— 通过 externalBin 把上面两个塞进安装包
 #
 # 注意：ds-core-host 走 Node SEA，只把入口脚本打进可执行文件；它运行时要 `require`
-# Node core 的 node_modules（lodash / @blue-frontier/mitmproxy 等），那部分由
-# dev-sidecar 仓库提供，本仓库 CI 不构建它。
+# `@blue-frontier/dev-sidecar`（Node core）与它的 12 个依赖。所以本 workflow 会去
+# `core_repo`（默认 baipinaaa/dev-sidecar-clean）按 `core_ref` sparse-clone 出
+# `packages/core`，装好运行时依赖后放进 `app/src-tauri/core-bundle/`，
+# 由 Tauri 打到 `$INSTDIR/resources/core-bundle/`。
+# 最后用 scripts/smoke-core-host.ps1 以「安装包形态」跑一次，确认 core 真能加载。
 on:
   workflow_dispatch:
     inputs:
@@ -36,11 +39,6 @@ on:
         options:
           - 'false'
           - 'true'
-      core_ref:
-        description: 'dev-sidecar-clean 仓库的 ref（tag / commit / 分支），默认 master'
-        required: false
-        default: 'master'
-        type: string
   push:
     tags:
       - 'v*'
