@@ -19,7 +19,8 @@ param(
         "https://linux.do/",
         "https://linux.do/latest.json",
         "https://discord.com/",
-        "https://cdn.jsdelivr.net/npm/vue@3/dist/vue.global.js"
+        "https://cdn.jsdelivr.net/npm/vue@3/dist/vue.global.js",
+        "https://example.com/"
     ),
     [string]$ProxyUrl = "",
     [int]$Rounds = 3,
@@ -81,7 +82,10 @@ function Test-Target([string]$url, [int]$round) {
     }
     $sw.Stop()
 
-    $hit = $ChallengeMarkers | Where-Object { $body -like "*$_*" } | Select-Object -First 1
+    $markerHit = $ChallengeMarkers | Where-Object { $body -like "*$_*" } | Select-Object -First 1
+    # 只有「非 2xx + 命中标记」才算被挑战：CF 挑战页是 403/503；
+    # 正常站点（如 discord 首页）正文里引用 challenge-platform 脚本属于常态。
+    $hit = if ($markerHit -and ($code -ne "200" -and $code -ne "204")) { $markerHit } else { $null }
     $ok = ($code -eq "200" -or $code -eq "204") -and -not $hit
 
     $tag = if ($ok) { "PASS" } else { "FAIL" }
