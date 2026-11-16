@@ -96,8 +96,23 @@ jobs:
           git clone --depth 1 --filter=blob:none --sparse --branch $ref "https://github.com/$repo.git" core-src
           if ($LASTEXITCODE -ne 0) { throw "clone $repo@$ref 失败" }
           git -C core-src sparse-checkout set packages/core
-          npm install --omit=dev --no-audit --no-fund --prefix core-src/packages/core
-          if ($LASTEXITCODE -ne 0) { throw 'core 依赖安装失败' }
+          if ($LASTEXITCODE -ne 0) { throw 'sparse-checkout 失败' }
+
+          $coreSrc = Join-Path (Get-Location) 'core-src/packages/core'
+          if (-not (Test-Path (Join-Path $coreSrc 'package.json'))) {
+            throw "core 目录不完整：$coreSrc（ref=$ref 是否存在？）"
+          }
+
+          # 必须 cd 进去再装：npm 的 --prefix 在 npm 11 上仍会读当前目录的 package.json，
+          # 仓库根没有 package.json，直接报 ENOENT。
+          Push-Location $coreSrc
+          try {
+            npm install --omit=dev --no-audit --no-fund
+            if ($LASTEXITCODE -ne 0) { throw 'core 依赖安装失败' }
+          } finally {
+            Pop-Location
+          }
+          Write-Host "core 依赖已安装：$coreSrc/node_modules" 
 
       - name: 把 core 放进安装包资源目录
         shell: pwsh
