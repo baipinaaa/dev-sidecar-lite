@@ -1,0 +1,81 @@
+name: ja3-baseline
+
+# B3：采集「真 Chrome」的 TLS 指纹基线。
+#
+# 为什么要它：B1 要决定是引入 BoringSSL 还是只做 ClientHello 定制，前提是知道
+# 要复刻的目标长什么样。当前只知道 rustls 是 `t13d1012h1_…`、Chrome 大致是
+# `t13d1516h2_…`，没有完整 JA3 字符串，等于闭眼投入。
+#
+# 采集方式：不用抓包。让 Chrome 自己访问会回显握手细节的服务（peet.ws / browserleaks），
+# 这些服务把对端看到的 JA3/JA4 原样吐回来 —— 比在 CI 里装 npcap 稳定得多。
+on:
+  workflow_dispatch:
+  push:
+    branches: [ja3-baseline]
+    paths:
+      - '.github/workflows/ja3-baseline.yml'
+      - 'tests/e2e/ja3_baseline.ps1'
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  baseline:
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Chrome 版本
+        shell: pwsh
+        run: |
+          $paths = @(
+            'C:\Program Files\Google\Chrome\Application\chrome.exe',
+            'C:\Program Files (x86)\Google\Chrome\Application\chrome.exe',
+            "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe"
+          )
+          $exe = $paths | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $exe) {
+            Write-Host '未找到 Chrome，安装中…'
+            choco install googlechrome -y --no-progress | Out-Null
+            $exe = $paths | Where-Object { Test-Path $_ } | Select-Object -First 1
+          }
+          if (-not $exe) { throw 'Chrome 不可用' }
+          "CHROME_EXE=$exe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          (Get-Item $exe).VersionInfo.ProductVersion
+          Write-Host "路径：$exe"
+
+      - name: 采集真实指纹
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File tests/e2e/ja3_baseline.ps1 -OutDir "$env:RUNNER_TEMP\baseline"
+          Get-ChildItem "$env:RUNNER_TEMP\baseline" | Format-Table Name, Length
+
+      - name: 上传基线
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ja3-baseline
+          path: ${{ runner.temp }}/baseline/**
+          retention-days: 90
+
+      - name: 贴到 issue #1
+        if: always()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $report = "$env:RUNNER_TEMP\baseline\report.md"
+          if (-not (Test-Path $report)) {
+            "采集脚本没有产出报告。" | Out-File -FilePath $report -Encoding utf8
+          }
+          $head = @"
+          ### 指纹基线（真 Chrome，自动采集）
+
+          run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          "@
+          ($head + (Get-Content $report -Raw)) | Out-File -FilePath "$env:RUNNER_TEMP\c.md" -Encoding utf8
+          gh issue comment 1 --repo ${{ github.repository }} --body-file "$env:RUNNER_TEMP\c.md"
