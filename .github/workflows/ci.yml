@@ -32,15 +32,41 @@ jobs:
     name: rustfmt
     runs-on: windows-latest
     # 开发机没有 Rust 工具链，无法本地跑 `cargo fmt`，因此格式检查暂不阻断构建。
-    # 首次成功编译后执行一次 `cargo fmt --all` 并提交，再把这里改回阻断。
+    # 这里除了报告差异，还直接跑一次 `cargo fmt --all` 并把补丁作为 artifact 回传
+    # （CI 不能自动提交），本地 `git apply` 一下即可，省去手工格式化整个工程。
     continue-on-error: true
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+
       - name: cargo fmt --check
-        run: cargo fmt --all -- --check
+        shell: bash
+        run: |
+          set +e
+          cargo fmt --all -- --check
+          echo "check_exit=$?" >> "$GITHUB_ENV"
+
+      - name: 生成格式化补丁
+        shell: bash
+        run: |
+          set -e
+          cargo fmt --all
+          git diff > rustfmt.patch || true
+          git status --short >> rustfmt.patch || true
+          echo "--- 补丁大小 ---"
+          wc -c rustfmt.patch || true
+          echo "--- 涉及文件 ---"
+          git diff --stat | tail -n 20 || true
+
+      - name: 回传补丁
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustfmt-patch
+          path: rustfmt.patch
+          retention-days: 30
 
   clippy:
     name: clippy

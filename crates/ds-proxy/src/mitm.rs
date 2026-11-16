@@ -31,7 +31,6 @@ const ESTABLISHED: &[u8] =
 #[derive(Clone)]
 pub struct Mitm {
     acceptor: TlsAcceptor,
-    connector: TlsConnector,
 }
 
 // tokio-rustls 的 TlsAcceptor / TlsConnector 没实现 Debug，这里只打印类型名。
@@ -61,13 +60,50 @@ impl Mitm {
             }
         };
 
-        let client_config = ds_tls::client::insecure_client_config();
-
         Some(Self {
             acceptor: TlsAcceptor::from(server_config),
-            connector: TlsConnector::from(client_config),
         })
     }
+}
+
+/// 上游 ClientConfig：ECH 域名现查 ECHConfig 再建配置，其余走普通 rustls。
+///
+/// 这里刻意"每次连接现查"，而不是像 Node 版那样做进程级缓存：
+/// ECHConfig 有 TTL，且 CF 会在轮换后返回 `retry_configs`；
+/// 短连接场景下多一次 DoH 查询（~30ms，可与 TCP 建连并行优化）换来的是不会用到过期配置。
+async fn upstream_client_config(config: &RuntimeConfig, host: &str) -> Arc<rustls::ClientConfig> {
+    let ech = &config.dns.ech;
+    if !(ech.enabled && ech.use_ech) {
+        return ds_tls::client::insecure_client_config();
+    }
+    if !ds_types::matcher::any_match(ech.domains.iter().map(|s| s.as_str()), host) {
+        return ds_tls::client::insecure_client_config();
+    }
+
+    let provider = ech
+        .dns
+        .as_deref()
+        .and_then(|name| config.dns.providers.get(name))
+        .map(|p| p.server.clone())
+        .or_else(|| config.dns.providers.values().next().map(|p| p.server.clone()));
+    let Some(server) = provider else {
+        tracing::debug!("{host} 需要 ECH，但没有可用的 DoH 提供方");
+        return ds_tls::client::insecure_client_config();
+    };
+
+    match ds_dns::resolve_ech(&server, host).await {
+        Ok(Some(bytes)) => match ds_tls::ech::build_upstream_config(false, Some(&bytes)) {
+            Ok(cfg) => {
+                tracing::debug!("{host} 使用 ECH（{} 字节配置，来自 {server}）", bytes.len());
+                return cfg;
+            }
+            Err(err) => tracing::warn!("{host} 构建 ECH 配置失败，降级为普通握手：{err:#}"),
+        },
+        Ok(None) => tracing::debug!("{host} 的 HTTPS 记录里没有 ECH（该站可能未开通）"),
+        Err(err) => tracing::warn!("{host} 查询 ECH 失败：{err:#}"),
+    }
+
+    ds_tls::client::insecure_client_config()
 }
 
 /// 是否应该解密该域名。
@@ -123,8 +159,8 @@ pub async fn handle(
     if port == 443 {
         let server_name = ServerName::try_from(host.clone())
             .with_context(|| format!("{host} 不是合法的 TLS 服务器名"))?;
-        let mut upstream = mitm
-            .connector
+        let connector = TlsConnector::from(upstream_client_config(&opts.config, &host).await);
+        let mut upstream = connector
             .connect(server_name, tcp)
             .await
             .with_context(|| format!("与 {host} 的上游 TLS 握手失败"))?;

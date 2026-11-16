@@ -23,6 +23,7 @@ param(
     ),
     [string]$ProxyUrl = "",
     [int]$Rounds = 3,
+    [string]$OutFile = "",
     [switch]$KeepRunning
 )
 
@@ -116,6 +117,32 @@ try {
         $color = if ($okCount -eq $_.Count -and $challenges -eq 0) { "Green" } else { "Yellow" }
         Write-Host ("{0,-55} 通过 {1}/{2}  平均 {3:N0}ms  挑战 {4}" -f `
             $_.Name, $okCount, $_.Count, $avg, $challenges) -ForegroundColor $color
+    }
+
+    if ($OutFile) {
+        $md = @()
+        $md += "### CF 验收（linux.do 是否进挑战循环）"
+        $md += ''
+        $md += "| 目标 | 通过 | 平均耗时 | 命中挑战 | 末次状态码 |"
+        $md += "| --- | --- | --- | --- | --- |"
+        foreach ($group in ($results | Group-Object Url)) {
+            $okCount = ($group.Group | Where-Object Ok).Count
+            $avg = ($group.Group | Measure-Object Ms -Average).Average
+            $challenges = ($group.Group | Where-Object Challenge).Count
+            $last = $group.Group[-1]
+            $md += "| $($group.Name) | $okCount/$($group.Count) | $([math]::Round($avg))ms | $challenges | $($last.Code) |"
+        }
+        $md += ''
+        if ($script:failures -eq 0) {
+            $md += '**结论：全部通过，未出现 Cloudflare 挑战页。**'
+        } else {
+            $md += '结论：' + $script:failures + ' 项失败（见上表「命中挑战」列）。'
+            $md += ''
+            $md += '若只有带挑战标记的站点失败，说明 TLS 指纹（JA3/JA4）被 CF 判定为非浏览器，'
+            $md += '与 `docs/FINGERPRINT.md` 的实测结论一致 —— 这类站点必须走 BoringSSL 通道。'
+        }
+        ($md -join "`n") | Out-File -FilePath $OutFile -Encoding utf8
+        Write-Host "报告已写入 $OutFile" -ForegroundColor Cyan
     }
 
     if ($script:failures -eq 0) {
