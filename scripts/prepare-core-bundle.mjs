@@ -244,6 +244,24 @@ function main () {
     // 4) extra/：sysproxy.exe、EnableLoopback.exe、scripts/、proxy/、pac/
     copyTree(path.join(opts.devSidecar, 'packages', 'gui', 'extra'), path.join(opts.out, 'extra'))
 
+    // 4.1 domestic-domain-allowlist.txt
+    //     core 的 set-system-proxy/index.js:311 是
+    //     `path.join(__dirname, '../', proxy.domesticDomainAllowListFilePath)`，
+    //     即 <core>/src/shell/scripts/extra/proxy/domestic-domain-allowlist.txt。
+    //     上游只把它放在 packages/gui/extra/proxy/ 下，core 自己那里没有 →
+    //     安装后每次开系统代理都报「读取失败」并去联网下载（离线必失败）。
+    {
+      const src = path.join(opts.devSidecar, 'packages', 'gui', 'extra', 'proxy', 'domestic-domain-allowlist.txt')
+      const dst = path.join(depsOut, '@blue-frontier', 'dev-sidecar', 'src', 'shell', 'scripts', 'extra', 'proxy')
+      if (fs.existsSync(src)) {
+        fs.mkdirSync(dst, { recursive: true })
+        fs.copyFileSync(src, path.join(dst, 'domestic-domain-allowlist.txt'))
+        console.log('[core-bundle] domestic-domain-allowlist.txt -> core/src/shell/scripts/extra/proxy/')
+      } else {
+        console.warn(`[core-bundle] 未找到 ${src}，开系统代理时会退回联网下载`)
+      }
+    }
+
     // 5) core-host（src + shim，SEA 需要它们在磁盘上）
     copyTree(path.join(liteRoot, 'core-host', 'src'), path.join(opts.out, 'core-host', 'src'))
     copyTree(path.join(liteRoot, 'core-host', 'shim'), path.join(opts.out, 'core-host', 'shim'))

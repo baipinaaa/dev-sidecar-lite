@@ -1,105 +1,118 @@
 # DevSidecar Lite
 
-把 [dev-sidecar](https://github.com/docmirror/dev-sidecar) 的**数据面**从 Node 换成 Rust、
-**展示面**从 Electron 换成 Tauri 2 的重构版。控制面（配置、插件、规则语义）继续沿用原来的
-Node 实现，不重写。
+把 [dev-sidecar](https://github.com/docmirror/dev-sidecar) 从 **Electron** 搬到 **Tauri 2** 的版本。
+数据面与控制面沿用原版成熟的 Node 实现，Rust 侧保留一条可切换的实验数据面。
 
-## 当前状态
+- 安装包 **32 MB**（原版 Electron 版 100 MB 上下），不带 Electron、不带自动更新
+- 界面是原版 GUI 的移植（同一套 Vue 页面、同一套配置语义、同一套拦截规则）
+- 默认数据面是 **Node**，与原版行为一致；Rust 数据面需在设置里把 `proxy.engine` 改成 `rust`
 
-> **骨架完成，未经过编译与端到端验证。**
->
-> 开发机上没有 Rust 工具链，所有 `.rs` 文件只做了括号配平与人工复核；JS 侧（`core-host`）
-> 有可运行的冒烟测试。首次 `cargo check` 预计需要修一批 API 签名（rcgen / rustls 的版本细节，
-> 相关位置在代码注释里已标出）。
+## 当前状态（v0.2.0）
 
-| 阶段 | 内容 | 状态 |
+| 部分 | 实现 | 状态 |
 | --- | --- | --- |
-| 0 | workspace、7 个 crate 骨架、配置映射、CI | ✅ |
-| 1 | 纯隧道代理 + MITM 证书 + 控制口 IPC | ✅ 待编译 |
-| 2 | DoH/DoT + SVCB/ECH + 指纹路线决策 | ✅ 已编译并实测 |
-| 2b | Chrome 指纹通道（BoringSSL，JA4 `t13d1517h2_`） | ✅ 已实现，待 CI 自检确认 |
-| 3 | 规则引擎 + IP 评分 + PAC | ✅ 待编译 |
-| 4 | Tauri UI 九页面 + 托盘 + sidecar | ✅ 前端完成 |
-| 5 | 引擎切换、旧版迁移、基准、发版 | ✅ 待实测 |
+| 控制面宿主 | `core-host/`（Node SEA 单文件 exe） | ✅ 安装包实测：`getApiList` 124 个接口、`/healthz`、`/invoke`、SSE 全通 |
+| 数据面（默认） | 原版 `@blue-frontier/mitmproxy`，`core-bundle/` 内随包下发 | ✅ 实测 `/pac.js` 200、CONNECT + MITM 解密、按规则直连/走代理 |
+| 界面 | 原版 `packages/gui` 的 Vue 页面移植到 Tauri 2 | ✅ `vite build` 通过，3242 modules |
+| Rust 数据面（实验） | `crates/ds-proxy` 等 7 个 crate | ⚠️ CI `cargo build/clippy/test` 全绿，**无端到端验证**，见「已知限制」 |
+| 安装包 | NSIS（perMachine）+ 静默安装冒烟 | ✅ 32.4 MB，冒烟覆盖「装→布局→healthz→getApiList→起数据面→/pac.js→卸载」 |
 
-## 为什么值得这么做
+`core-bundle/` 是运行时目录，不打进 SEA：里面是 Node core + mitmproxy + `extra/`（`sysproxy.exe`、
+证书脚本、PAC），SEA 的 `require()` 只能加载内置模块，所以这些必须留在磁盘上。
 
-Electron + Node 版能跑，但有三个结构性问题：
+## 安装
 
-1. **每字节都要过一次用户态 JS**：8 并发实测 CPU 峰值 **228%**（两个核满），而上游只给 6MB/s。
-2. **ECH 只能靠自写的 TLS 1.3 栈**（2288 行 JS）：没有 HTTP/2、没有 GREASE、ALPN 为空，
-   Cloudflare 一眼看出"声称 Chrome 149 但握手不是 Chrome"，于是反复触发人机验证。
-3. **UI 与数据面耦合在同一个 Electron 进程树里**：改一个开关要重启整个渲染进程。
+从 [Releases](https://github.com/baipinaaa/dev-sidecar-lite/releases) 下载 `*_x64-setup.exe`，
+右键以管理员身份安装（默认装到 `C:\Program Files\DevSidecar Lite`）。
 
-Rust 数据面 + Tauri 壳分别解决这三点：rustls 原生 ECH/H2、tokio 多线程字节搬运、UI 只做桥接。
+- 首次开启「系统代理」或「PAC 分流」时会提示安装根证书，按提示点「是」
+- 从 Electron 版迁移见 [`docs/MIGRATE-FROM-ELECTRON.md`](docs/MIGRATE-FROM-ELECTRON.md)：
+  两个版本会争抢 `127.0.0.1:31181`，先卸载旧版或在旧版里关掉「系统代理」
+- 没有自动更新：换版本手动下载覆盖安装
 
-## 目录
+## 架构
 
 ```
-dev-sidecar-lite/
-├─ crates/
-│  ├─ ds-types/    # running.json 的完整映射 + 通配符/正则匹配
-│  ├─ ds-rules/    # intercepts 语义、白名单/排除、头改写
-│  ├─ ds-dns/      # DoH/DoT/UDP + SVCB(ECH) + IP 评分 + 失败分类 + 拒绝记忆
-│  ├─ ds-tls/      # rcgen 动态签证书、rustls 客户端、ECH 配置
-│  ├─ ds-proxy/    # 代理主进程：CONNECT / MITM / 直连转发 / 控制口
-│  ├─ ds-pac/      # PAC 生成（与 Node 版逐条对齐）
-│  └─ ds-ctl/      # NDJSON 控制协议 + 连接注册表
-├─ core-host/      # Node 控制面宿主：core.api → HTTP + SSE
-├─ app/            # Tauri 2 + Vue 3 界面
-├─ docs/           # 架构、迁移、指纹、基准
-├─ tests/e2e/      # 冒烟、一致性、CF 验收、基准、JA3 解析
-└─ .github/workflows/{ci,release}.yml
+DevSidecar Lite.exe        Tauri 2 外壳（WebView2 + 原版 Vue 页面）
+  └─ ds-core-host.exe      Node SEA：加载 core-bundle，暴露 HTTP /invoke + SSE /events
+       ├─ core-bundle/node_modules/@blue-frontier/dev-sidecar    控制面（配置/插件/规则/PAC/证书）
+       ├─ core-bundle/node_modules/@blue-frontier/mitmproxy      数据面（fork 出子进程）
+       ├─ core-bundle/extra/                                      sysproxy.exe、证书脚本、PAC
+       └─ core-bundle/core-host/mitmproxy-bridge.cjs              fork 目标（注入 rootDir）
+  └─ (可选) ds-proxy.exe   Rust 实验数据面，engine=rust 时才启动
 ```
 
-## 快速开始
+界面 → `ds-core-host` → `core.api` 这条链路和原版一致，所以插件、`config.json` 语义、
+`intercepts` / `dns.mapping` / `preSetIpList` 等规则全部照旧生效。
+
+### 与 Electron 版的差异
+
+| | Electron 版 | 本版 |
+| --- | --- | --- |
+| 外壳 | Electron 42（Chromium + Node 双份运行时） | Tauri 2（系统 WebView2） |
+| 控制面 | Electron 主进程内 | `ds-core-host.exe`（Node SEA）独立进程 |
+| 界面通信 | `ipcRenderer.invoke('apiInvoke')` | HTTP `POST /invoke` |
+| 状态推送 | `ipcRenderer.on('status'/'speed'/...)` | SSE `/events`（`core-event` 再按 `channel` 分发） |
+| 系统能力 | `electron.shell` / `electron-dialog` | `tauri-plugin-opener` / `tauri-plugin-dialog` |
+| 自动更新 | electron-updater | 无（手动下载） |
+| 抓包诊断 | 内建 CDP + `<webview>` | 变通方案：用系统浏览器打开 + 复制代理地址 |
+
+## 开发
 
 ```powershell
-# 1) 只跑数据面（需要先有一份 running.json，Electron 版跑过一次就有）
-cargo run --release -p ds-proxy -- --config "$env:USERPROFILE\.dev-sidecar\running.json" --port 31182
-curl.exe -x http://127.0.0.1:31182 --ssl-no-revoke https://www.baidu.com/ -o NUL -w "%{http_code} %{time_total}`n"
-
-# 2) 控制面
+# 控制面（用仓库里的 dev-sidecar 源码，不装包）
 $env:DS_CORE_PATH = "..\dev-sidecar\packages\core"
+$env:DS_EXTRA_PATH = "..\dev-sidecar\packages\gui\extra"
 node core-host/src/main.js --port 31190 -v
 
-# 3) 界面（浏览器模式，走 mock）
-cd app; npm install; npm run dev
+# 界面
+cd app; npm install; npm run tauri:dev
 
-# 4) 完整桌面版
-cd app; npm run tauri:dev
+# 组装 core-bundle（CI 里同一条命令）
+node scripts/prepare-core-bundle.mjs --dev-sidecar ..\dev-sidecar --max-mb 70
 ```
 
-详细步骤见 [`app/README.md`](app/README.md)，从旧版迁移见
-[`docs/MIGRATE-FROM-ELECTRON.md`](docs/MIGRATE-FROM-ELECTRON.md)。
+Rust 侧（需要 MSVC 工具链 + NASM）：
 
-## 设计边界（重要）
+```powershell
+cargo build --release --workspace
+node core-host/scripts/build-sea.js     # 需要 postject
+pwsh -File scripts/prepare-binaries.ps1 -Strict
+```
 
-- **不做锁区/年龄门绕过**：S302 那套"作者服务器中转"的方案不在本项目范围内。
-- **不内建任何远程配置/脚本注入**：所有规则来自本地 `running.json`。
-- **默认只监听回环**：`ds-proxy` 与 `core-host` 都绑 `127.0.0.1`；`core-host` 改系统代理，绝不暴露到局域网。
-- **引擎可回退**：`config.proxy.engine = "node"` 随时回到原实现，不需要改安装包。
-- **没有自动更新**：安装包不带 updater（无签名通道、无静默升级），换版本只能手动下载覆盖安装。
+## 已知限制
 
-## 已知风险
+**Rust 实验数据面**（`proxy.engine = rust`）目前只适合看热闹：
 
-- 未编译验证（见上文状态表）。
-- `hudsucker` 未采用，MITM 是手写的（`crates/ds-proxy/src/mitm.rs`），覆盖面比成熟库窄：
-  目前只处理 HTTP/1.1，HTTP/2 上游会退化为直连隧道。
-- 指纹伪装（JA3/JA4 与 Chrome 一致）**已实现但需显式开启**：`intercepts` 里写
-  `"fingerprint": "chrome"` 的域名走 BoringSSL 通道（`crates/ds-tls/src/chrome.rs`），
-  其余域名仍走 rustls。rustls 通道的 JA3 已在 CI 实测为
-  `5b81f3846b1faddcc37be70ed494c956`，与 Chrome 在 GREASE / X25519 / ALPN h2 / 套件集等
-  七个维度全不同，所以**会做 TLS 指纹比对的站点必须走 BoringSSL 通道**。详见 [`docs/FINGERPRINT.md`](docs/FINGERPRINT.md)。
-- 性能数据只测了 Node 侧基线，Rust 侧待填，见 [`docs/BENCHMARK.md`](docs/BENCHMARK.md)。
+1. MITM 只处理 HTTP/1.1，HTTP/2 上游退化为直连隧道
+2. 请求/响应改写规则（`intercepts` 的 `reqReplace` / `resReplace` / `headerReplace`）尚未接入
+3. 不输出 `status` / `speed` / `traffic` 事件，界面上的速度与流量是空的
+4. 不支持 Chrome 指纹通道（`fingerprint: chrome`），JA3 与 Chrome 不同
+
+要替代原版数据面，还差「拦截器体系 + 规则改写 + 指纹通道」三块，工作量远大于壳的改造，
+所以默认不启用。原版 Node 数据面能跑的地域，两者行为一致。
+
+**其它**
+
+- 只支持 Windows x64；托盘图标与全局快捷键未移植
+- 安装包未签名：SmartScreen 会提示「未知发布者」，点「更多信息 → 仍要运行」
+- `app/src-tauri/icons/` 需要提交进仓库（tauri-build 在编译期就要读 `icon.ico`，
+  被 `.gitignore` 忽略过一次，CI 直接红在 Windows Resource 那一步）
+
+## 设计边界
+
+- **不做锁区/年龄门绕过**：作者服务器中转那套方案不在本项目范围内
+- **不内建远程脚本注入**：所有规则来自本地 `config.json`
+- **只监听回环**：`ds-core-host` 与 `ds-proxy` 都绑 `127.0.0.1`
+- **引擎可回退**：`proxy.engine` 随时切回 `node`
 
 ## 致谢
 
 - [docmirror/dev-sidecar](https://github.com/docmirror/dev-sidecar)：配置语义、插件与规则体系的来源
 - [Hana-ame/ech-proxy](https://github.com/Hana-ame/ech-proxy)：PAC 分流的思路
 - [NLick47/hakimi](https://github.com/NLick47/hakimi)：IP 评分模型、失败分类、路由级拒绝记忆
-- [rustls](https://github.com/rustls/rustls)：客户端 ECH 实现
-- [rcgen](https://github.com/rustls/rcgen)、[tokio](https://github.com/tokio-rs/tokio)、[Tauri](https://github.com/tauri-apps/tauri)
+- [rustls](https://github.com/rustls/rustls)、[rcgen](https://github.com/rustls/rcgen)、
+  [tokio](https://github.com/tokio-rs/tokio)、[Tauri](https://github.com/tauri-apps/tauri)
 
 ## 许可
 
