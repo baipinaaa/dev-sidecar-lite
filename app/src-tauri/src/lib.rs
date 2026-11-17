@@ -282,11 +282,19 @@ async fn stream_events(app: &AppHandle, core: &CoreClient, url: &str) -> Result<
             }
 
             let payload: Value = serde_json::from_str(&data).unwrap_or(Value::String(data));
-            let channel = match event_name.as_str() {
-                "status" | "speed" | "traffic" | "log" => event_name,
-                _ => "status".to_string(),
-            };
-            let _ = app.emit(&channel, payload);
+
+            // 事件名不能原样当 Tauri 事件名：Tauri 只接受字母数字与 `-`/`/`/`:`/`_`，
+            // 像 `config.changed` 这种带点号的名字会被静默丢弃（前端就永远收不到）。
+            // 所以额外发一条 `core-event`，把 {channel, payload} 原封不动交给前端自己分发。
+            let _ = app.emit(
+                "core-event",
+                json!({ "channel": event_name, "payload": payload.clone() }),
+            );
+
+            // 保留原来的窄通道，兼容早期前端（status/speed/traffic/log 都是合法事件名）
+            if matches!(event_name.as_str(), "status" | "speed" | "traffic" | "log") {
+                let _ = app.emit(&event_name, payload);
+            }
         }
     }
 

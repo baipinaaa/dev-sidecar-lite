@@ -49,6 +49,21 @@ export async function subscribe (name, handler) {
   return tauriListen(name, event => handler(event.payload))
 }
 
+/**
+ * 拉起 SSE 转发（Rust 侧一条长连接，把 core-host 的推送转成 Tauri 事件）。
+ *
+ * 这一步以前从没被调用过，所以状态栏永远不更新、只能靠界面上的乐观更新。
+ * 重复调用是安全的：Rust 侧发现订阅已存活就直接返回。
+ */
+export function startStatusStream () {
+  if (!tauriInvoke) {
+    return Promise.resolve()
+  }
+  return tauriInvoke('start_status_stream').catch((err) => {
+    console.error('启动状态流失败：', err)
+  })
+}
+
 /** core-host 的连通性信息（地址 / 是否就绪 / 版本）。 */
 export function coreInfo () {
   return tauriInvoke ? tauriInvoke('core_info') : Promise.resolve({ ready: false, baseUrl: '(浏览器模式)' })

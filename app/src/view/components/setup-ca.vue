@@ -1,0 +1,117 @@
+<script>
+import { defineComponent } from 'vue';
+
+export default defineComponent({
+  emits: ['update:open', 'setup'],
+  name: 'SetupCa',
+
+  components: {
+
+  },
+
+  props: {
+    title: {
+      type: String,
+      default: '安装根证书',
+    },
+    open: {
+      type: Boolean,
+    },
+  },
+
+  data () {
+    return {
+      systemPlatform: '',
+    }
+  },
+
+  computed: {
+    setupImage () {
+      const base = import.meta.env.BASE_URL || './'
+      if (this.systemPlatform === 'mac') {
+        return `${base}setup-mac.png`
+      } else if (this.systemPlatform === 'linux') {
+        return `${base}setup-linux.png`
+      } else {
+        return `${base}setup.png`
+      }
+    },
+  },
+
+  async created () {
+    this.systemPlatform = await this.$api.info.getSystemPlatform()
+  },
+
+  methods: {
+    async openExternal (url) {
+      await this.$api.ipc.openExternal(url)
+    },
+    afterVisibleChange (val) {
+    },
+    showDrawer () {
+      this.$emit('update:open', true)
+    },
+    onClose () {
+      this.$emit('update:open', false)
+    },
+    async doSetup () {
+      this.$emit('setup')
+      if (this.systemPlatform === 'linux') {
+        this.$message.success('根证书已成功安装到系统证书库（注意：浏览器仍然需要手动安装）')
+      }
+      // 安装后关闭抽屉，避免遮罩一直挡住主界面
+      this.onClose()
+    },
+  },
+});
+</script>
+
+<template>
+  <a-drawer
+    placement="right"
+    :closable="true"
+    :mask-closable="true"
+    :keyboard="true"
+    :open="open"
+    @after-open-change="afterVisibleChange"
+    width="660px"
+    height="100%"
+    wrap-class-name="json-wrapper"
+    @close="onClose"
+  >
+    <template #title>
+      {{ title }}
+      <a-button type="primary" style="float:right" @click="doSetup()">
+        点此去安装
+      </a-button>
+      <a-button style="float:right;margin-right:10px;" @click="openExternal('https://github.com/docmirror/dev-sidecar/blob/master/doc/caroot.md')">
+        为什么要安装证书？
+      </a-button>
+      <a-button style="float:right;margin-right:10px;" @click="onClose()">
+        关闭
+      </a-button>
+    </template>
+    <div>
+      <b>本应用在非“安全模式”下必须安装和信任CA根证书</b>，该证书是应用启动时本地随机生成的<br>
+
+      <template v-if="systemPlatform === 'mac'">
+        1、点击右上角“点此去安装按钮”，打开钥匙串，<b style="color:red">选择”系统“</b><br>
+        2、然后按如下图步骤将随机生成的根证书设置为始终信任<br>
+        3、可能需要重新启动应用和浏览器才能生效<br>
+        4、注意：如果出现无法导入提示时，先点一下钥匙串的左边切换到<b style="color:red">“系统”栏</b>，然后再重新安装证书即可<br>
+      </template>
+      <template v-else-if="systemPlatform === 'linux'">
+        1、点击右上角“点此去安装按钮”,将自动安装到系统证书库中<br>
+        2、<b color="red">火狐、chrome等浏览器不走系统证书</b>，需要手动安装(下图以chrome为例安装根证书)<br>
+        3、火狐浏览器证书入口：设置 → 隐私与安全 → 连接与软件安全 → 高级设置 → 证书 → 管理证书 → 证书颁发机构 → 导入<br>
+        4、旧版火狐证书入口：设置（或选项） → 隐私与安全 → 证书 → 查看证书<br>
+        5、导入证书后勾选「信任由此证书颁发机构来标识网站」，确定即可<br>
+      </template>
+      <template v-else>
+        1、点击右上角“点此去安装按钮”，打开证书<br>
+        2、然后按如下图步骤将根证书添加到<b style="color:red">信任的根证书颁发机构</b>
+      </template>
+    </div>
+    <img width="100%" :src="setupImage">
+  </a-drawer>
+</template>

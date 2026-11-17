@@ -1,0 +1,540 @@
+<script>
+import lodash from 'lodash'
+import { CheckOutlined, CloseOutlined } from '@ant-design/icons-vue'
+import DsContainer from '../components/container'
+import SetupCa from '../components/setup-ca'
+
+export default {
+  name: 'Index',
+  components: {
+    DsContainer,
+    SetupCa,
+    CheckOutlined,
+    CloseOutlined,
+  },
+  data () {
+    return {
+      publicPath: import.meta.env.BASE_URL || './',
+      status: undefined,
+      startup: {
+        loading: false,
+        doClick: () => {
+          if (this.status.server.enabled) {
+            this.apiCall(this.startup, this.$api.shutdown)
+          } else {
+            this.apiCall(this.startup, this.$api.startup)
+          }
+        },
+      },
+      info: {},
+      newVersionDownloading: false,
+      setting: {},
+      server: {
+        key: '代理服务',
+        loading: false,
+        doClick: (checked) => {
+          this.onServerClick(checked)
+        },
+      },
+      switchBtns: undefined,
+      config: undefined,
+      setupCa: {
+        visible: false,
+      },
+    }
+  },
+  computed: {
+    // 直接引用 $global.update（front.js 里挂的全局对象，所有 IPC 回包直接改它），
+    // 避免 data() 里一次性 Object.assign 拷贝出的局部副本失去响应性，
+    // 导致"检查更新"按钮在下载/进度时永远不亮
+    _update () {
+      return this.$global.update || { checking: false, downloading: false, progress: 0, newVersion: false }
+    },
+    _rootCaSetuped () {
+      if (this.setting.rootCa) {
+        return this.setting.rootCa.setuped === true
+      }
+      return false
+    },
+    // 【本版本定制】已移除 GitHub 星标徽章（_githubStarBadgeUrl）。
+    // 原实现会在每次打开首页时请求第三方 img.shields.io，属于应用自行发起的外部请求。
+  },
+  async created () {
+    await this.doCheckRootCa()
+    await this.reloadConfig()
+    this.status = this.$status
+    this.switchBtns = this.createSwitchBtns()
+    // 自动检查更新 延后到 mounted 中处理（等待代理服务启动后再执行）
+    this.$api.info.get().then((ret) => {
+      this.info = ret
+    })
+  },
+  mounted () {
+    // 【本版本定制】已移除启动时自动检查更新。
+    // 原实现会在代理服务就绪后自动请求 GitHub API 检查新版本，属于应用自行发起的网络请求；
+    // 现改为仅在用户主动点击「检查更新」按钮（doCheckUpdate(true)）时才执行。
+  },
+  methods: {
+    /** 按模式写入拦截/测速开关（首页模式选择，已移除「增强模式/ow」） */
+    applyMode (mode) {
+      if (mode === 'safe') {
+        this.config.server.intercept.enabled = false
+        this.config.server.dns.speedTest.enabled = true
+      } else if (mode === 'default') {
+        this.config.server.intercept.enabled = true
+        this.config.server.dns.speedTest.enabled = true
+      }
+    },
+    async modeChange (event) {
+      const mode = this.config.app.mode
+      console.log('modeChange', mode, event)
+      this.applyMode(mode)
+      const configCopy = lodash.cloneDeep(this.config)
+      await this.$api.config.save(configCopy)
+      if (this.status.server && this.status.server.enabled) {
+        return this.$api.server.restart()
+      }
+    },
+    async doCheckRootCa () {
+      const setting = await this.$api.setting.load()
+      console.log('setting', setting)
+      this.setting = setting || {}
+      if (this.setting.rootCa && (this.setting.rootCa.setuped || this.setting.rootCa.noTip)) {
+        return
+      }
+      this.$confirm({
+        title: '第一次使用，请先安装CA根证书',
+        content: '本应用正常使用，必须安装和信任CA根证书',
+        cancelText: '下次安装',
+        okText: '去安装',
+        onOk: () => {
+          this.openSetupCa()
+        },
+        onCancel: () => {
+          this.setting.rootCa = this.setting.rootCa || {}
+          // const rootCa = this.setting.rootCa
+          // rootCa.noTip = true
+          // this.$api.setting.save(this.setting)
+        },
+      })
+    },
+    openSetupCa () {
+      this.setupCa.visible = true
+    },
+    getDateTimeStr () {
+      const date = new Date() // 创建一个表示当前日期和时间的 Date 对象
+      const year = date.getFullYear() // 获取年份
+      const month = String(date.getMonth() + 1).padStart(2, '0') // 获取月份（注意月份从 0 开始计数）
+      const day = String(date.getDate()).padStart(2, '0') // 获取天数
+      const hours = String(date.getHours()).padStart(2, '0') // 获取小时
+      const minutes = String(date.getMinutes()).padStart(2, '0') // 获取分钟
+      const seconds = String(date.getSeconds()).padStart(2, '0') // 获取秒数
+      const milliseconds = String(date.getMilliseconds()).padStart(3, '0') // 获取毫秒
+      return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}.${milliseconds}`
+    },
+    async handleCaSetuped () {
+      const certPath = this.config?.server?.setting?.rootCaFile?.certPath
+      console.log('certPath:', certPath)
+      if (!certPath) {
+        this.$message.error('证书路径未配置，请先启动代理服务生成 CA 根证书后再试')
+        return
+      }
+      // 获取系统平台类型：Linux 用 shell.setupCa 复制证书，
+      // Windows/macOS 用 Electron 主进程 shell.openPath 避免 cmd.exe 权限问题
+      const platform = await this.$api.info.getSystemPlatform()
+      if (platform === 'linux') {
+        await this.$api.shell.setupCa({ certPath })
+      } else {
+        await this.$api.shell.openPath(certPath)
+      }
+      this.setting.rootCa = this.setting.rootCa || {}
+      const rootCa = this.setting.rootCa
+
+      // 根证书已安装
+      rootCa.setuped = true
+      // 保存安装时间
+      rootCa.setupTime = this.getDateTimeStr()
+      // 保存安装描述
+      rootCa.desc = '根证书已安装'
+      // 删除noTip数据
+      // delete rootCa.noTip
+
+      this.$api.setting.save(JSON.parse(JSON.stringify(this.setting)))
+    },
+    reloadConfig () {
+      return this.$api.config.reload().then((ret) => {
+        this.config = ret
+        return ret
+      })
+    },
+    createSwitchBtns () {
+      console.log('api,', this.$api)
+      const btns = {}
+      const status = this.status
+      btns.server = this.createSwitchBtn('server', '代理服务', this.$api.server, status)
+      btns.proxy = this.createSwitchBtn('proxy', '系统代理', this.$api.proxy, status)
+      // PAC 自动分流：与「系统代理」互斥。开启后由代理服务提供 /pac.js，
+      // 系统代理改为「自动配置脚本」，只有命中加速规则的域名走代理，其余直连。
+      btns.pac = {
+        loading: false,
+        key: 'pac',
+        label: 'PAC 分流',
+        tip: '按域名自动分流：命中加速规则的站点走代理，其余站点直连（与系统代理互斥）',
+        isPlugin: false,
+        restartServer: false,
+        status: () => {
+          return this.status.proxy != null && this.status.proxy.pacEnabled === true
+        },
+        doClick: (checked) => {
+          this.onSwitchClick(this.switchBtns.pac, this.$api.proxy.startPac, this.$api.proxy.closePac, checked)
+        },
+      }
+      lodash.forEach(status.plugin, (item, key) => {
+        if (this.config.plugin[key].statusOff) {
+          return
+        }
+        btns[key] = this.createSwitchBtn(key, this.config.plugin[key].name, this.$api.plugin[key], status.plugin, this.config.plugin[key].tip, this.config.plugin[key])
+      })
+      return btns
+    },
+    createSwitchBtn (key, label, apiTarget, statusParent, tip, pluginConfig) {
+      return {
+        loading: false,
+        key,
+        label,
+        tip,
+        isPlugin: pluginConfig != null,
+        restartServer: pluginConfig != null && pluginConfig.restartServer === true,
+        status: () => {
+          return statusParent[key].enabled
+        },
+        doClick: (checked) => {
+          this.onSwitchClick(this.switchBtns[key], apiTarget.start, apiTarget.close, checked)
+        },
+      }
+    },
+    async apiCall (btn, api, param) {
+      btn.loading = true
+      try {
+        const ret = await api(param)
+        console.log('this status', this.status)
+        return ret
+      } catch (err) {
+        btn.loading = false // 有时候记录日志会卡死，先设置为false
+        console.log('api invoke error:', err)
+      } finally {
+        btn.loading = false
+      }
+    },
+
+    async onSwitchClick (btn, openApi, closeApi, checked) {
+      const ret = checked
+        ? await this.apiCall(btn, openApi)
+        : await this.apiCall(btn, closeApi)
+
+      // 持久化 enabled 状态，并与对应设置页/托盘保持同步
+      try {
+        if (btn.isPlugin) {
+          this.config.plugin[btn.key].enabled = checked
+        } else if (btn.key === 'server') {
+          this.config.server.enabled = checked
+        } else if (btn.key === 'proxy') {
+          this.config.proxy.enabled = checked
+          // 固定系统代理会接管 AutoConfigURL，开启时同步关掉 PAC 的持久化开关
+          if (checked) {
+            this.config.proxy.pacEnabled = false
+          }
+        } else if (btn.key === 'pac') {
+          this.config.proxy.pacEnabled = checked
+          // 与固定系统代理互斥：开启 PAC 时同步关闭固定代理的持久化开关
+          if (checked) {
+            this.config.proxy.enabled = false
+          }
+        }
+        const saveRet = await this.$api.config.save(lodash.cloneDeep(this.config))
+        this.config = saveRet.allConfig
+        if (btn.isPlugin && btn.restartServer && this.status.server && this.status.server.enabled) {
+          await this.$api.server.restart()
+        }
+      } catch (e) {
+        console.error('保存开关状态失败:', e)
+      }
+      return ret
+    },
+    onServerClick (checked) {
+      return this.onSwitchClick(this.server, this.$api.server.start, this.$api.server.close, checked)
+    },
+    start (checked) {
+      this.apiCall(this.startup, this.$api.startup)
+    },
+    openSettings () {
+      this.setting.visible = true
+    },
+    onConfigChanged (newConfig) {
+      console.log('config changed', newConfig)
+      this.reloadConfig().then(() => {
+        if (this.status.server) {
+          return this.$api.server.restart()
+        }
+      })
+    },
+    goDonate () {
+      this.$message.info('感谢支持')
+    },
+    doCheckUpdate (fromUser) {
+      this.$api.update.checkForUpdate(fromUser)
+    },
+    async openExternal (url) {
+      await this.$api.ipc.openExternal(url)
+    },
+    onShutdownTipClose (e) {
+      this.$confirm({
+        title: '是否永久关闭该提示',
+        okText: '我已知晓，不再提示',
+        cancelText: '下次还显示',
+        onOk: () => {
+          this.$api.config.update({ app: { showShutdownTip: false } })
+        },
+      })
+    },
+    onAdClose () {
+      this.$confirm({
+        title: '是否关闭首页广告',
+        okText: '不再显示',
+        cancelText: '仅本次关闭',
+        onOk: () => {
+          this.$api.config.update({ app: { showHomeAd: false } })
+        },
+      })
+    },
+    openAd () {
+      const url = this.config?.app?.homeAd?.url
+      if (url) {
+        this.openExternal(url)
+      }
+    },
+  },
+}
+</script>
+
+<template>
+  <DsContainer class="page_index">
+    <template #header>
+      给开发者的辅助工具
+    </template>
+    <template #header-right>
+      <a-button style="margin-right:10px" @click="openSetupCa">
+        <a-badge :count="_rootCaSetuped ? 0 : 1" dot>安装根证书</a-badge>
+      </a-button>
+
+      <a-button
+        style="margin-right:10px" :loading="_update.downloading || _update.checking" :title="`当前版本:${info.version}`"
+        @click="doCheckUpdate(true)"
+      >
+        <a-badge :count="_update.newVersion ? 1 : 0" dot>
+          <span v-if="_update.downloading">{{ _update.progress }}%</span>{{ _update.downloading ? '新版本下载中' : (`检查更新${_update.checking ? '中' : ''}`) }}
+        </a-badge>
+      </a-button>
+    </template>
+
+    <div class="box">
+      <a-alert v-if="config && config.app.showShutdownTip" message="本应用开启后会修改系统代理，直接重启电脑可能会无法上网，您可以再次启动本应用即可恢复。如您需要卸载，在卸载前请务必完全退出本应用再进行卸载" banner closable @close="onShutdownTipClose" />
+      <a-alert
+        v-if="config && config.app.showHomeAd && config.app.homeAd && config.app.homeAd.url"
+        type="info"
+        banner
+        closable
+        class="home-ad"
+        @close="onAdClose"
+      >
+        <template #message>
+          <span class="home-ad-label">广告</span>
+          <a v-if="config.app.homeAd.text" class="home-ad-link" @click.prevent="openAd">{{ config.app.homeAd.text }}</a>
+          <span v-if="config.app.homeAd.description" class="home-ad-desc">{{ config.app.homeAd.description }}</span>
+        </template>
+      </a-alert>
+      <div v-if="config && config.app" class="mode-bar" style="margin:20px;">
+        <a-radio-group v-model:value="config.app.mode" button-style="solid" @change="modeChange">
+          <a-tooltip placement="topLeft" title="启用测速，关闭拦截（不稳定，不需要安装证书，最安全）">
+            <a-radio-button value="safe">
+              安全模式
+            </a-radio-button>
+          </a-tooltip>
+          <a-tooltip placement="topLeft" title="启用测速，启用拦截（需要安装证书）">
+            <a-radio-button value="default">
+              默认模式
+            </a-radio-button>
+          </a-tooltip>
+        </a-radio-group>
+      </div>
+
+      <div
+        v-if="status"
+        class="main-control-panel"
+      >
+        <div class="main-switch-wrapper">
+          <div class="big-button">
+            <a-button
+              shape="circle"
+              :class="{ 'is-active': status.server.enabled }"
+              :loading="startup.loading"
+              @click="startup.doClick"
+            >
+              <img v-if="!startup.loading && !status.server.enabled" width="50" :src="`${publicPath}logo/logo-simple.svg`">
+              <img v-if="!startup.loading && status.server.enabled" width="50" :src="`${publicPath}logo/logo-fff.svg`">
+            </a-button>
+            <div class="switch-status-label" :class="{ 'is-active': status.server.enabled }">
+              {{ status.server.enabled ? '已开启' : '已关闭' }}
+            </div>
+          </div>
+        </div>
+        <div class="sub-switches-wrapper">
+          <a-form :label-col="{ span: 15 }" :wrapper-col="{ span: 9 }">
+            <a-form-item v-for="(item, key) in switchBtns" :key="key" :label="item.label">
+              <a-tooltip placement="topLeft" :title="item.tip">
+                <a-switch
+                  class="sub-switch"
+                  :loading="item.loading"
+                  :checked="item.status()"
+                  @change="item.doClick"
+                >
+                  <template #checkedChildren><CheckOutlined /></template>
+                  <template #unCheckedChildren><CloseOutlined /></template>
+                </a-switch>
+              </a-tooltip>
+            </a-form-item>
+          </a-form>
+        </div>
+      </div>
+    </div>
+
+    <SetupCa title="安装证书" v-model:open="setupCa.visible" @setup="handleCaSetuped" />
+    <!-- 【本版本定制】已移除 #footer 的 star 模块（内置 img.shields.io 徽章，会发起第三方请求） -->
+  </DsContainer>
+</template>
+
+<style lang="scss">
+.page_index {
+  .mode-bar {
+    margin: 30px;
+    text-align: center;
+  }
+
+  /* 【本版本定制】.star 样式已随之移除（原用于 #footer 的 GitHub 星标徽章） */
+
+  /* 主控制面板 */
+  .main-control-panel {
+    margin-top: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-around;
+    flex-direction: row;
+  }
+
+  /* 主开关区域 */
+  .main-switch-wrapper {
+    text-align: center;
+
+    .big-button {
+      > button {
+        width: 100px;
+        height: 100px;
+        border-radius: 100px;
+        transition: all 0.3s ease;
+        border: 2px solid var(--btn-border);
+        background-color: var(--btn-bg);
+
+        &:hover {
+          border-color: var(--accent-hover);
+          box-shadow: 0 0 8px var(--accent-shadow);
+        }
+
+        /* 激活状态 */
+        &.is-active {
+          background-color: var(--accent-color);
+          border-color: var(--accent-color);
+          box-shadow: 0 0 12px var(--accent-shadow);
+
+          &:hover {
+            background-color: var(--accent-hover);
+            border-color: var(--accent-hover);
+          }
+        }
+      }
+
+      > button i {
+        font-size: 40px;
+      }
+    }
+
+    .switch-status-label {
+      margin-top: 10px;
+      font-size: 14px;
+      font-weight: 500;
+      color: var(--text-secondary);
+      transition: color 0.3s ease;
+
+      &.is-active {
+        color: var(--accent-color);
+        font-weight: 600;
+      }
+    }
+  }
+
+  /* 子开关区域 */
+  .sub-switches-wrapper {
+    margin-top: 20px;
+
+    .sub-switch {
+      margin-left: 10px;
+
+      &.ant-switch-checked {
+        background-color: #1890ff;
+      }
+    }
+  }
+}
+
+.payQrcode {
+  padding: 10px;
+  display: flex;
+  justify-content: space-evenly;
+}
+
+div.ant-form-item {
+  margin-bottom: 9px;
+}
+
+/* 表单标签固定宽度，防止不同长度文字导致按钮错位 */
+.page_index .ant-form-item-label {
+  flex: 0 0 100px !important;
+}
+
+.home-ad {
+  .home-ad-label {
+    display: inline-block;
+    margin-right: 8px;
+    padding: 0 6px;
+    font-size: 12px;
+    line-height: 18px;
+    color: #999;
+    border: 1px solid #ccc;
+    border-radius: 2px;
+  }
+
+  .home-ad-link {
+    color: #1890ff;
+    text-decoration: none;
+
+    &:hover {
+      text-decoration: underline;
+    }
+  }
+
+  .home-ad-desc {
+    margin-left: 8px;
+    color: rgba(0, 0, 0, 0.45);
+    font-size: 12px;
+  }
+}
+</style>
