@@ -119,16 +119,23 @@ function readJson (file) {
 
 function run (cmd, args, cwd) {
   // pnpm 可能是 .mjs（npm 装的 pnpm 包），此时用当前 node 解释执行
-  if (cmd.endsWith('.mjs')) {
+  if (/\.(mjs|cjs|js)$/i.test(cmd)) {
     args = [cmd, ...args]
     cmd = process.execPath
+  }
+  // Windows 上 npm 全局安装出来的是 pnpm.cmd；`shell: false` 时 execFileSync
+  // 不会去补 .cmd 后缀，于是报 `spawnSync pnpm ENOENT`（CI runner 上必踩）。
+  let shell = false
+  if (process.platform === 'win32' && !/\.[a-z0-9]+$/i.test(cmd) && !/[\\/]/.test(cmd)) {
+    cmd = `${cmd}.cmd`
+    shell = true
   }
   console.log(`[core-bundle] $ ${cmd} ${args.join(' ')}`)
   execFileSync(cmd, args, {
     cwd,
     stdio: 'inherit',
     env: { ...process.env, CI: process.env.CI || '' },
-    shell: false,
+    shell,
   })
 }
 
