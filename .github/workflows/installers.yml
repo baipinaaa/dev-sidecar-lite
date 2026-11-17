@@ -172,30 +172,16 @@ jobs:
         working-directory: app
         run: npm install
 
-      - name: 没配签名密钥时关掉 updater 产物
-        shell: pwsh
-        run: |
-          # tauri 的 createUpdaterArtifacts 要求有签名私钥；没有密钥就直接关掉，
-          # 否则打包会失败（本地有密钥的人把 secrets 配上即可自动打开）。
-          if ('${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}' -eq '') {
-            python scripts/strip-updater.py
-          } else {
-            Write-Host '检测到签名密钥，保留 updater 产物'
-          }
-
       - name: 打包
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: app
           args: --target x86_64-pc-windows-msvc
           tagName: ${{ github.event.inputs.release_tag }}
           releaseName: ${{ github.event.inputs.release_tag }}
           releaseDraft: true
-          includeUpdaterJson: false
 
       - name: 上传安装包
         if: always()

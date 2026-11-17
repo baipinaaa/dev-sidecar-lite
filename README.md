@@ -79,6 +79,7 @@ cd app; npm run tauri:dev
 - **不内建任何远程配置/脚本注入**：所有规则来自本地 `running.json`。
 - **默认只监听回环**：`ds-proxy` 与 `core-host` 都绑 `127.0.0.1`；`core-host` 改系统代理，绝不暴露到局域网。
 - **引擎可回退**：`config.proxy.engine = "node"` 随时回到原实现，不需要改安装包。
+- **没有自动更新**：安装包不带 updater（无签名通道、无静默升级），换版本只能手动下载覆盖安装。
 
 ## 已知风险
 

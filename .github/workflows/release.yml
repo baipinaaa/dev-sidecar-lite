@@ -1,7 +1,7 @@
 name: release
 
-# 打 tag 才构建，且必须人工确认：这个 workflow 会往 GitHub Release 发安装包，
-# 而安装包带 updater 签名，一旦发错版本用户会自动升级到错的构建。
+# 打 tag 才构建：这个 workflow 会往 GitHub Release 发安装包，发错版本影响面较大，
+# 所以只允许 tag 或手工触发（项目没有自动更新通道，装过旧版的用户不会被动升级）。
 on:
   push:
     tags:
@@ -70,12 +70,10 @@ jobs:
         working-directory: app
         run: npm install --no-audit --no-fund
 
-      - name: 构建并发布（NSIS + updater 产物）
+      - name: 构建并发布（NSIS 安装包）
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: app
           tagName: ${{ github.event.inputs.tag || github.ref_name }}
