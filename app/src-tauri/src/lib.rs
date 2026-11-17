@@ -9,6 +9,7 @@
 //! - 地址：环境变量 `DS_CORE_HOST_URL`，默认 `http://127.0.0.1:31190`
 //! - 凭据：环境变量 `DS_CORE_HOST_TOKEN`，或 `<数据目录>/run/core.token` 文件内容
 
+mod core_proc;
 mod legacy;
 
 use std::sync::Mutex;
@@ -49,7 +50,9 @@ impl CoreClient {
             .post(&url)
             .json(&json!({ "api": api, "param": param.unwrap_or(Value::Null) }));
 
-        if let Some(token) = self.token.as_ref() {
+        // token 惰性读取：core-host 由本进程启动，首次调用时凭据文件才刚生成
+        let token = self.token.clone().or_else(read_token_file);
+        if let Some(token) = token {
             request = request.bearer_auth(token);
         }
 
@@ -114,6 +117,7 @@ struct AppState {
     core: CoreClient,
     engine: Mutex<EngineStatus>,
     stream: AsyncMutex<Option<tokio::task::JoinHandle<()>>>,
+    core_proc: core_proc::CoreProcess,
 }
 
 impl Default for AppState {
@@ -125,6 +129,7 @@ impl Default for AppState {
                 detail: None,
             }),
             stream: AsyncMutex::new(None),
+            core_proc: core_proc::CoreProcess::new(),
         }
     }
 }
@@ -402,8 +407,16 @@ pub fn run() {
                 });
             }
 
+            // 界面所有按钮都走 core，必须先把它拉起来
+            app.state::<AppState>().core_proc.start();
+
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("启动 Tauri 失败");
+        .build(tauri::generate_context!())
+        .expect("构建 Tauri 应用失败")
+        .run(|handle, event| {
+            if let tauri::RunEvent::Exit = event {
+                handle.state::<AppState>().core_proc.stop();
+            }
+        });
 }

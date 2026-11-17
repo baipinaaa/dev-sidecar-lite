@@ -6,14 +6,16 @@
 .DESCRIPTION
     为什么需要这个脚本：`ds-core-host` 是 Node SEA，只把入口打进 exe，
     core（`@blue-frontier/dev-sidecar`）是运行时才 `require` 的。
-    如果打包时忘了把 core 放进 `resources/core-bundle/`，安装包能装上、
-    exe 也能启动，但一进去就 MODULE_NOT_FOUND，UI 全部接口失败 ——
+    如果打包时忘了把 core 放进安装目录，安装包能装上、exe 也能启动，
+    但一进去就 MODULE_NOT_FOUND，UI 全部接口失败 ——
     光看「打包成功」的退出码是发现不了的。
 
-    所以这里模拟真实安装目录：
+    所以这里模拟真实安装目录（**按实测的 tauri 布局**：bundle.resources 会
+    原样放到安装根目录，core-bundle 与主程序同级，而不是 resources/ 下）：
 
         <work>/ds-core-host.exe
-        <work>/resources/core-bundle/packages/core/...
+        <work>/core-bundle/packages/core/...
+        <work>/core-bundle/packages/mitmproxy/...
 
     然后不设 `DS_CORE_PATH`，完全靠 exe 自己按安装布局解析，
     起 HTTP 后调用 `status.get` 断言返回 200。
@@ -50,7 +52,7 @@ if (-not (Test-Path $exePath)) {
 $coreDir = Join-Path $bundlePath 'packages/core'
 if (-not (Test-Path $coreDir)) {
     Write-Host "[FAIL] 找不到 core 目录：$coreDir" -ForegroundColor Red
-    Write-Host '       说明打包流程没有把 core 放进 resources/core-bundle/' -ForegroundColor Yellow
+    Write-Host '       说明打包流程没有把 core 放进 app/src-tauri/core-bundle/' -ForegroundColor Yellow
     exit 1
 }
 
@@ -58,9 +60,9 @@ $work = Join-Path ([System.IO.Path]::GetTempPath()) ("dsl-smoke-" + [Guid]::NewG
 $dataDir = Join-Path $work 'data'
 New-Item -ItemType Directory -Force -Path $work, $dataDir | Out-Null
 
-# 模拟安装目录：exe 与 resources/ 平级
+# 模拟安装目录：exe 与 core-bundle/ 平级（实测布局，见文件头注释）
 Copy-Item $exePath (Join-Path $work 'ds-core-host.exe') -Force
-$destBundle = Join-Path $work 'resources/core-bundle'
+$destBundle = Join-Path $work 'core-bundle'
 New-Item -ItemType Directory -Force -Path $destBundle | Out-Null
 Copy-Item $bundlePath/* $destBundle -Recurse -Force
 

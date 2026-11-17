@@ -99,9 +99,11 @@ function tryRequire (dir) {
  */
 function resolveCore () {
   const packaged = runtime.installRoots().flatMap((root) => [
-    // 当前布局：`app/src-tauri/core-bundle/**` 被打进 `$INSTDIR/resources/core-bundle/**`
+    // 实测的安装布局：tauri 的 bundle.resources 会原样放到安装根目录下，
+    // 所以 core-bundle 与主程序同级（$INSTDIR/core-bundle/packages/core），
+    // 不在 resources/ 里。三条都保留，少一条就会在某个版本上"配置生效不了"。
+    path.join(root, 'core-bundle', 'packages', 'core'),
     path.join(root, 'resources', 'core-bundle', 'packages', 'core'),
-    // 旧布局（保留兼容）
     path.join(root, 'resources', 'app', 'packages', 'core'),
   ])
 

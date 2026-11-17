@@ -13,7 +13,8 @@ export const useAppStore = defineStore('app', {
       plugin: {}
     },
     logs: [],
-    unsubscribers: []
+    unsubscribers: [],
+    error: ''
   }),
 
   getters: {
@@ -26,11 +27,41 @@ export const useAppStore = defineStore('app', {
 
   actions: {
     async bootstrap () {
-      this.core = await coreInfo()
-      this.engine = await engineStatus()
+      // core-host 由主进程拉起，界面可能比它先就绪：等一会儿再判定失败，
+      // 否则用户看到的就是"界面在、点按钮没反应"。
+      for (let attempt = 0; attempt < 30; attempt++) {
+        try {
+          const info = await coreInfo()
+          this.core = info
+          if (info && info.ready) break
+        } catch (err) {
+          if (attempt === 29) this.setError(`连接控制面失败：${err.message || err}`)
+        }
+        await new Promise(resolve => setTimeout(resolve, 400))
+      }
+
+      if (!this.core?.ready) {
+        this.setError(`控制面没有启动（${this.core?.baseUrl || '未知地址'}）：安装目录下的 ds-core-host.exe 未能运行，界面操作都会失败。`)
+      }
+
+      try {
+        this.engine = await engineStatus()
+      } catch (err) {
+        this.pushLog(`读取引擎状态失败：${err.message || err}`)
+      }
+
       await this.reload()
       await this.watch()
       this.ready = true
+    },
+
+    setError (message) {
+      this.error = String(message || '')
+      if (this.error) this.pushLog(this.error)
+    },
+
+    clearError () {
+      this.error = ''
     },
 
     async reload () {
@@ -81,7 +112,12 @@ export const useAppStore = defineStore('app', {
       const entry = map[key]
       if (!entry) throw new Error(`未知开关：${key}`)
 
-      await invoke(enabled ? entry.on : entry.off)
+      try {
+        await invoke(enabled ? entry.on : entry.off)
+      } catch (err) {
+        this.setError(`操作失败（${key}）：${err.message || err}`)
+        throw err
+      }
       if (key === 'pac') {
         this.applyStatus('proxy.pacEnabled', enabled)
         if (enabled) this.applyStatus('proxy.enabled', false)
@@ -105,7 +141,12 @@ export const useAppStore = defineStore('app', {
     },
 
     async togglePlugin (name, enabled) {
-      await invoke(`plugin.${name}.${enabled ? 'start' : 'stop'}`)
+      try {
+        await invoke(`plugin.${name}.${enabled ? 'start' : 'stop'}`)
+      } catch (err) {
+        this.setError(`插件 ${name} 操作失败：${err.message || err}`)
+        throw err
+      }
       this.applyStatus(`plugin.${name}.enabled`, enabled)
       if (this.config?.plugin?.[name]) this.config.plugin[name].enabled = enabled
       await invoke('config.save', this.config).catch(() => {})

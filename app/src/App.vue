@@ -46,6 +46,10 @@ onUnmounted(() => store.dispose())
     </aside>
 
     <main class="content">
+      <div v-if="store.error" class="banner">
+        <span class="banner-text">{{ store.error }}</span>
+        <button class="banner-close" title="关闭" @click="store.clearError()">×</button>
+      </div>
       <router-view />
     </main>
   </div>
