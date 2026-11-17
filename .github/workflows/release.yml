@@ -117,6 +117,12 @@ jobs:
           $bundleMb = [math]::Round(((Get-ChildItem app/src-tauri/core-bundle -Recurse -File | Measure-Object Length -Sum).Sum / 1MB), 1)
           Write-Host "core-bundle = $bundleMb MB（门禁 $env:CORE_BUNDLE_MAX_MB MB）"
 
+      # tauri-action 会在 app/ 下执行 `npm run tauri build`，
+      # 没有 node_modules 时报 `'tauri' is not recognized`（installers/release 第一次跑就踩到了）
+      - name: 安装 app 依赖
+        working-directory: app
+        run: npm install --no-audit --no-fund
+
       - name: 构建前端并打包安装包
         uses: tauri-apps/tauri-action@v0
         env:

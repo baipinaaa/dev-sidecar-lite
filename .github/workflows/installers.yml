@@ -92,6 +92,12 @@ jobs:
           pwsh -File scripts/prepare-binaries.ps1 -Strict
           if ($LASTEXITCODE -ne 0) { throw 'sidecar 二进制缺失' }
 
+      # tauri-action 会在 app/ 下执行 `npm run tauri build`，
+      # 没有 node_modules 时报 `'tauri' is not recognized`（installers/release 第一次跑就踩到了）
+      - name: 安装 app 依赖
+        working-directory: app
+        run: npm install --no-audit --no-fund
+
       - name: 打包安装包
         uses: tauri-apps/tauri-action@v0
         with:
