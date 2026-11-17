@@ -99,8 +99,9 @@ impl CoreProcess {
 
             #[cfg(windows)]
             {
+                let pid_arg = pid.to_string();
                 let _ = Command::new("taskkill")
-                    .args(["/PID", &pid.to_string(), "/T", "/F"])
+                    .args(["/PID", pid_arg.as_str(), "/T", "/F"])
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
                     .status();
