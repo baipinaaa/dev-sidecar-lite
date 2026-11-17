@@ -281,14 +281,29 @@ try {
     }
     $token = (Get-Content $tokenFile -Raw).Trim()
     $headers = @{ Authorization = "Bearer $token" }
-    $invoke = {
+    # -NoProxy：runner 上可能配了系统代理，127.0.0.1 不该走代理
+    $invokeRaw = {
         param([string]$api, $param = $null)
         $body = @{ api = $api; param = $param } | ConvertTo-Json -Compress -Depth 12
-        Invoke-RestMethod -Uri "$base/invoke" -Method Post -Headers $headers `
-            -ContentType 'application/json' -Body $body -TimeoutSec 60
+        (Invoke-WebRequest -Uri "$base/invoke" -Method Post -Headers $headers `
+                -ContentType 'application/json' -Body $body -TimeoutSec 60 -NoProxy).Content
+    }
+    $invoke = {
+        param([string]$api, $param = $null)
+        & $invokeRaw $api $param | ConvertFrom-Json
     }
 
-    $apiList = @(& $invoke 'getApiList')
+    $rawApiList = & $invokeRaw 'getApiList'
+    $apiList = @($rawApiList | ConvertFrom-Json)
+    if ($rawApiList -match '"ok"\s*:\s*false') {
+        $detail = "getApiList 调用失败：$rawApiList"
+        throw $detail
+    }
+    if ($apiList.Count -lt 20) {
+        $head = $rawApiList.Substring(0, [Math]::Min(800, $rawApiList.Length))
+        $detail = "getApiList 只返回 $($apiList.Count) 项，原始响应：$head"
+        throw $detail
+    }
     $required = @('server.start', 'server.close', 'proxy.start', 'config.get', 'config.save',
         'setting.load', 'setting.save', 'serviceGroups.list', 'info.get',
         'shell.openPath', 'getApiList')
