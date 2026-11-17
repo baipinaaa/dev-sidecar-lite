@@ -21,7 +21,7 @@ const { ApiError, describe, invoke } = require('./dispatch')
 
 const MAX_BODY = 4 * 1024 * 1024
 const HEARTBEAT_MS = 15000
-const FORWARDED_CHANNELS = new Set(['status', 'speed', 'traffic', 'error', 'log'])
+const FORWARDED_CHANNELS = new Set(['status', 'speed', 'traffic', 'error', 'log', 'config.changed'])
 
 function resolveDataDir () {
   const fromEnv = process.env.DS_DATA_DIR
@@ -97,6 +97,7 @@ function writeJson (res, status, payload) {
  *
  * @param {object} options
  * @param {object} options.core        core 模块（含 api）
+ * @param {object} [options.localApi]  localApi（优先于 core.api 查找）
  * @param {string} [options.dataDir]   数据目录
  * @param {string} [options.host]      监听地址，默认 127.0.0.1
  * @param {number} [options.port]      监听端口，0 表示随机（实际端口见返回值）
@@ -110,6 +111,8 @@ function createHost (options) {
   }
 
   const api = core.api
+  const localApi = options.localApi || null
+  const roots = localApi ? [localApi, api] : [api]
   const dataDir = options.dataDir || resolveDataDir()
   const token = options.token || loadOrCreateToken(dataDir)
   const subscribers = new Set()
@@ -181,7 +184,7 @@ function createHost (options) {
     const apiName = body && body.api
     const param = body ? body.param : null
 
-    // 两个本地增强接口：Rust 侧需要，Node core 里没有
+    // 三个本地增强接口：Rust 侧需要，Node core 里没有
     if (apiName === 'engine.status') {
       return engineStatus()
     }
@@ -198,10 +201,21 @@ function createHost (options) {
       return engineStatus()
     }
     if (apiName === 'api.list') {
-      return describe(api)
+      return describe(api, localApi)
+    }
+    if (apiName === 'shutdown') {
+      // core 的 shutdown 只是置位/关子进程，不会结束本进程（Electron 版的活由 app.quit 干）。
+      // 在 core-host 里它就是「关闭本进程」的语义，所以这里接管：先等结果，再走优雅退出。
+      const result = await invoke(roots, apiName, param)
+      if (options.onShutdown) {
+        setTimeout(() => {
+          Promise.resolve(options.onShutdown()).finally(() => process.exit(0))
+        }, 50)
+      }
+      return result
     }
 
-    return invoke(api, apiName, param)
+    return invoke(roots, apiName, param)
   }
 
   const server = http.createServer((req, res) => {
@@ -272,7 +286,8 @@ function createHost (options) {
     server,
     token,
     dataDir,
-    describe: () => describe(api),
+    broadcast,
+    describe: () => describe(api, localApi),
     listen (host, port) {
       return new Promise((resolve, reject) => {
         server.once('error', reject)

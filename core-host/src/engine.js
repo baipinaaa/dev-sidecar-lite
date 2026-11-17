@@ -24,7 +24,9 @@ const runtime = require('./runtime')
  */
 function resolveShimPath () {
   const candidates = [
-    process.env.DS_resolveShimPath(),
+    // 之前这里写成了 `process.env.DS_resolveShimPath()`：环境变量是字符串，调用它就抛
+    // `TypeError: process.env.DS_resolveShimPath is not a function`，安装包里 rust 引擎必崩。
+    process.env.DS_SHIM_PATH,
     ...runtime.findInResources('core-bundle', 'core-host', 'shim', 'rust-engine.js'),
     path.join(__dirname, '..', 'shim', 'rust-engine.js'),
   ].filter(Boolean)
@@ -67,7 +69,7 @@ function resolveRustProxyPath () {
  * @returns {{engine: 'node'|'rust', rustPath: string|null, reason: string}}
  */
 function resolveEngine ({ configured, rustPath }) {
-  const wanted = configured || 'auto'
+  const wanted = configured || 'node'
   const exe = rustPath === undefined ? resolveRustProxyPath() : rustPath
 
   if (wanted === 'node') {
@@ -79,10 +81,9 @@ function resolveEngine ({ configured, rustPath }) {
     }
     return { engine: 'node', rustPath: null, reason: '配置指定 rust，但未找到 ds-proxy.exe，已回退' }
   }
-  if (exe) {
-    return { engine: 'rust', rustPath: exe, reason: 'auto 命中 ds-proxy.exe' }
-  }
-  return { engine: 'node', rustPath: null, reason: 'auto 未找到 ds-proxy.exe' }
+  // 路线 4 的纪律：auto 一律用 Node 数据面。Rust 只做实验通道，必须显式配置 `proxy.engine: rust`
+  // 才启用；否则即使在 dev 目录里找到了 target/release/ds-proxy.exe 也不该抢默认位置。
+  return { engine: 'node', rustPath: null, reason: '默认 node（auto）' }
 }
 
 /**
@@ -97,7 +98,7 @@ function entryFor (engine, nodeEntry) {
     return resolveShimPath()
   }
   if (!nodeEntry) {
-    throw new Error('Node 引擎入口缺失：请设置 DS_MITMPROXY_PATH')
+    throw new Error('Node 引擎入口缺失：请设置 DS_MITMPROXY_PATH 或确认 core-bundle 里有 core-host/mitmproxy-bridge.cjs')
   }
   return nodeEntry
 }

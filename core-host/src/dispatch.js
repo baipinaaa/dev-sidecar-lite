@@ -21,7 +21,7 @@ function getByPath (target, dotted) {
   return current
 }
 
-function describe (api) {
+function describe (api, extra) {
   const result = {}
   const walk = (node, prefix, depth) => {
     if (node == null || depth > 3) {
@@ -38,6 +38,9 @@ function describe (api) {
     }
   }
   walk(api, '', 0)
+  if (extra != null) {
+    walk(extra, '', 0)
+  }
   return result
 }
 
@@ -50,20 +53,33 @@ class ApiError extends Error {
 }
 
 /**
- * 调用 core 的接口。
+ * 调用接口，查找顺序与原版 `backend.js` 的 `invoke` 一致：localApi 优先，core.api 兜底。
  *
- * @param {object} root  core.api
- * @param {string} api   形如 `proxy.startPac`
- * @param {*} param      原样作为第一个参数传入
+ * @param {object|object[]} root  按优先级排列的接口树
+ * @param {string} api            形如 `proxy.startPac`
+ * @param {*} param               原样作为第一个参数传入
  */
 async function invoke (root, api, param) {
   if (typeof api !== 'string' || api.trim() === '') {
     throw new ApiError('api 不能为空', 'invalid_api')
   }
 
-  const target = getByPath(root, api)
+  const roots = Array.isArray(root) ? root : [root]
+  let target
+  for (const candidate of roots) {
+    if (candidate == null) {
+      continue
+    }
+    const found = getByPath(candidate, api)
+    if (found !== undefined) {
+      target = found
+      break
+    }
+  }
+
   if (target === undefined) {
-    throw new ApiError(`未知接口: ${api}`, 'unknown_api')
+    // 与原版文案一致，前端「接口不存在」的提示不用改
+    throw new ApiError(`api 接口不存在: ${api}`, 'unknown_api')
   }
   if (typeof target !== 'function') {
     throw new ApiError(`接口不可调用: ${api}`, 'not_callable')
