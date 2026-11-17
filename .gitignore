@@ -5,8 +5,6 @@ app/dist/
 core-host/dist/
 app/src-tauri/binaries/*.exe
 app/src-tauri/gen/
-app/src-tauri/icons/*.ico
-app/src-tauri/icons/*.png
 *.log
 crates/ds-types/tests/fixtures/running.json
 
