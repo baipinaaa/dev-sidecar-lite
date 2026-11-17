@@ -175,13 +175,31 @@ function resolveMitmproxyPath () {
   }
 }
 
+/** 从 core 包目录反推 core-bundle 根：`<bundle>/node_modules/@blue-frontier/dev-sidecar` */
+function bundleRootFromCore (coreDir) {
+  if (!coreDir || !path.isAbsolute(coreDir)) {
+    return null
+  }
+  const marker = path.join('node_modules', '@blue-frontier', 'dev-sidecar')
+  const normalized = coreDir.replace(/[\/]+$/, '')
+  if (!normalized.endsWith(marker)) {
+    return null
+  }
+  return normalized.slice(0, -marker.length).replace(/[\/]+$/, '')
+}
+
 /** 找到 core-bundle 根目录（含 extra/ 与 node_modules/ 的那层），用于 extra 与版本号 */
-function resolveBundleRoot () {
+function resolveBundleRoot (coreDir) {
   // 显式指定（冒烟测试 / 开发时直接指向 app/src-tauri/core-bundle）
   if (process.env.DS_CORE_BUNDLE) {
     return process.env.DS_CORE_BUNDLE
   }
   const candidates = [
+    // 安装布局：exe 在 $INSTDIR，bundle 在 $INSTDIR/core-bundle
+    path.join(path.dirname(process.execPath), 'core-bundle'),
+    path.join(path.dirname(process.execPath), 'resources', 'core-bundle'),
+    // 已经有 core 的绝对路径时，直接反推最可靠（不依赖 execPath / __dirname 在 SEA 下的语义）
+    bundleRootFromCore(coreDir),
     ...runtime.findInResources('core-bundle', 'core-host', 'mitmproxy-bridge.cjs').map((hit) =>
       path.resolve(path.dirname(hit), '..', '..')),
     path.resolve(__dirname, '..', '..'),
@@ -201,7 +219,7 @@ async function main () {
 
   const { core, from } = resolveCore()
   const nodeEntry = resolveMitmproxyPath()
-  const bundleRoot = resolveBundleRoot()
+  const bundleRoot = resolveBundleRoot(from)
 
   // extra/：sysproxy.exe、EnableLoopback.exe、scripts/、pac/ 都在它下面。
   // core 的 `extra-path/index.js` 用它解析外部脚本目录，mitmproxy 的 bridge 用它算 rootDir。

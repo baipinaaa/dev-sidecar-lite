@@ -17,10 +17,14 @@ const path = require('node:path')
 const nodeModule = require('node:module')
 const { spawn } = require('node:child_process')
 
-function req (name) {
-  // 延迟 require：bundle 尚未就绪时也能 --check 通过
-  return require(name)
-}
+/*
+ * 注意：这里**不能**直接用 `require(name)`。
+ *
+ * SEA 里 esbuild 保留下来的 `require(...)` 走的是 node 的 embedderRequire，
+ * 只认内置模块，加载磁盘上的包会抛
+ * `ERR_UNKNOWN_BUILTIN_MODULE: No such built-in module: @blue-frontier/mitmproxy/src/json.js`。
+ * 所有第三方/工作区包都必须经 `packageRequire(dir)`（= createRequire）加载。
+ */
 
 /**
  * 建一个以 `dir` 为基址的 require。
@@ -146,12 +150,13 @@ function createLocalApi (options) {
   const bundleRoot = options.bundleRoot || process.cwd()
   const emit = options.emit || (() => {})
 
-  const lodash = packageRequire(options.coreDir)('lodash')
-  const jsonApi = req('@blue-frontier/mitmproxy/src/json.js')
-  const configLoader = req('@blue-frontier/dev-sidecar/src/config/local-config-loader.js')
-  const loggerFactory = req('@blue-frontier/dev-sidecar/src/utils/util.logger.js')
-  const serviceGroup = req('@blue-frontier/dev-sidecar/src/service-group.js')
-  const coreConfig = req('@blue-frontier/dev-sidecar/src/config/index.js')
+  const pkgReq = packageRequire(options.coreDir)
+  const lodash = pkgReq('lodash')
+  const jsonApi = pkgReq('@blue-frontier/mitmproxy/src/json.js')
+  const configLoader = pkgReq('@blue-frontier/dev-sidecar/src/config/local-config-loader.js')
+  const loggerFactory = pkgReq('@blue-frontier/dev-sidecar/src/utils/util.logger.js')
+  const serviceGroup = pkgReq('@blue-frontier/dev-sidecar/src/service-group.js')
+  const coreConfig = pkgReq('@blue-frontier/dev-sidecar/src/config/index.js')
 
   const coreDefaultConfig = coreConfig.defaultConfig
 
@@ -276,12 +281,12 @@ function createLocalApi (options) {
         return loggerFactory.getLogDir()
       },
       async securityMigrate () {
-        const migrate = req('@blue-frontier/dev-sidecar/src/utils/util.security-migrate')
+        const migrate = pkgReq('@blue-frontier/dev-sidecar/src/utils/util.security-migrate')
         return migrate.runMigration_to3_0_0()
       },
       async redactLogs () {
         const dir = loggerFactory.getLogDir()
-        const { redactLogDir } = req('@blue-frontier/dev-sidecar/src/utils/util.redact-logs')
+        const { redactLogDir } = pkgReq('@blue-frontier/dev-sidecar/src/utils/util.redact-logs')
         return redactLogDir(dir)
       },
       getSystemPlatform (throwIfUnknown = false) {

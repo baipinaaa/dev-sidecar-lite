@@ -138,7 +138,7 @@ function Uninstall-App {
         break
     }
     Wait-Until -TimeoutSeconds 60 -What '卸载完成' -Condition {
-        -not (Test-Path $coreHostExe) -and -not (Test-Path $appExe)
+        -not (Test-Path $coreHostExe)
     } | Out-Null
 }
 
@@ -175,8 +175,10 @@ try {
     Write-Host "    安装器退出码：$($installProc.ExitCode)"
     $installed = $true
 
+    # 不要把主程序 exe 名写死：Tauri 用 productName 命名，改过 productName/mainBinaryName
+    # 就会出现「装好了但脚本等不到 DevSidecar Lite.exe」这种假失败
     if (-not (Wait-Until -TimeoutSeconds 120 -What '安装目录出现 exe' -Condition {
-                (Test-Path $appExe) -and (Test-Path $coreHostExe)
+                (Test-Path $coreHostExe) -and (Test-Path (Join-Path $bundleDir 'node_modules'))
             })) {
         Show-Diagnostics
         # 兜底：万一 NSIS 把目录名换了（productName 带后缀等），只要里面有一份带
@@ -201,7 +203,16 @@ try {
             throw $detail
         }
     }
-    Write-Host '    安装完成'
+    $mainExe = Get-ChildItem $installDir -Filter '*.exe' -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -notin @('ds-proxy.exe', 'ds-core-host.exe', 'uninstall.exe') } |
+        Select-Object -First 1
+    if ($mainExe) {
+        $appExe = $mainExe.FullName
+    } else {
+        Write-Host '    [WARN] 安装目录里没有主程序 exe' -ForegroundColor Yellow
+        $appExe = $null
+    }
+    Write-Host "    安装完成（主程序：$(if ($appExe) { $appExe } else { '未找到' })）"
 
     Write-Host '==> 2/8 校验安装布局'
     if (-not (Test-Path $proxyExe)) {
@@ -328,7 +339,7 @@ try {
         $installed = $false
     } else {
         Uninstall-App
-        if ((Test-Path $coreHostExe) -or (Test-Path $appExe)) {
+        if ((Test-Path $coreHostExe) -or ($appExe -and (Test-Path $appExe))) {
             $detail = '卸载之后安装目录里仍有主程序'
             throw $detail
         }
