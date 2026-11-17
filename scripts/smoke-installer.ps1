@@ -142,16 +142,64 @@ function Uninstall-App {
     } | Out-Null
 }
 
+function Show-Diagnostics {
+    # 安装失败时把「到底装到哪去了」打出来，否则 CI 日志只有一句「没找到 exe」
+    Write-Host '--- 诊断：候选安装目录 ---'
+    $roots = @($env:ProgramFiles, ${env:ProgramFiles(x86)}, (Join-Path $env:LOCALAPPDATA 'Programs'), $env:ProgramData)
+    foreach ($r in $roots) {
+        if (-not $r -or -not (Test-Path $r)) { continue }
+        Get-ChildItem $r -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -like '*DevSidecar*' -or $_.Name -like '*dev-sidecar*' } |
+            ForEach-Object { Write-Host "    $($_.FullName)" }
+    }
+    Write-Host '--- 诊断：卸载注册项 ---'
+    @('HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall',
+        'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall',
+        'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall') | ForEach-Object {
+        if (-not (Test-Path $_)) { return }
+        Get-ChildItem $_ -ErrorAction SilentlyContinue | ForEach-Object {
+            $p = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
+            if ($p.DisplayName -like '*DevSidecar*') {
+                Write-Host "    $($p.DisplayName) -> $($p.InstallLocation) [$($p.DisplayVersion)]"
+            }
+        }
+    }
+}
+
 try {
     Write-Host "==> 1/8 静默安装：$installerPath"
-    Start-Process -FilePath $installerPath -ArgumentList '/S' -Wait -WindowStyle Hidden
+    # 显式给 /D=：NSIS 的 /D 必须是最后一个参数且不能带引号，所以走 cmd 拼一次命令行；
+    # 同时拿退出码——只等目录出现的话，安装器直接失败时日志里什么都看不到。
+    $installCmd = '"' + $installerPath + '" /S /D=' + $installDir
+    $installProc = Start-Process -FilePath $env:ComSpec -ArgumentList '/c', $installCmd -PassThru -Wait -WindowStyle Hidden
+    Write-Host "    安装器退出码：$($installProc.ExitCode)"
     $installed = $true
 
-    if (-not (Wait-Until -TimeoutSeconds 90 -What '安装目录出现 exe' -Condition {
+    if (-not (Wait-Until -TimeoutSeconds 120 -What '安装目录出现 exe' -Condition {
                 (Test-Path $appExe) -and (Test-Path $coreHostExe)
             })) {
-        $detail = "安装后没有找到 $appExe / $coreHostExe"
-        throw $detail
+        Show-Diagnostics
+        # 兜底：万一 NSIS 把目录名换了（productName 带后缀等），只要里面有一份带
+        # ds-core-host.exe 的目录就认它，继续验证真实布局
+        $alt = @($env:ProgramFiles, ${env:ProgramFiles(x86)}, (Join-Path $env:LOCALAPPDATA 'Programs')) |
+            Where-Object { $_ -and (Test-Path $_) } |
+            ForEach-Object { Get-ChildItem $_ -Directory -ErrorAction SilentlyContinue } |
+            Where-Object { Test-Path (Join-Path $_.FullName 'ds-core-host.exe') } |
+            Select-Object -First 1
+        if ($alt) {
+            Write-Host "    [WARN] 安装目录名与预期不同，改用：$($alt.FullName)" -ForegroundColor Yellow
+            $installDir = $alt.FullName
+            $appExe = Join-Path $installDir 'DevSidecar Lite.exe'
+            $coreHostExe = Join-Path $installDir 'ds-core-host.exe'
+            $proxyExe = Join-Path $installDir 'ds-proxy.exe'
+            $bundleDir = Join-Path $installDir 'core-bundle'
+            $corePkg = Join-Path $bundleDir 'node_modules/@blue-frontier/dev-sidecar'
+            $mitmproxyPkg = Join-Path $bundleDir 'node_modules/@blue-frontier/mitmproxy'
+            $extraDir = Join-Path $bundleDir 'extra'
+        } else {
+            $detail = "安装后没有找到 $appExe / $coreHostExe（安装器退出码 $($installProc.ExitCode)）"
+            throw $detail
+        }
     }
     Write-Host '    安装完成'
 
