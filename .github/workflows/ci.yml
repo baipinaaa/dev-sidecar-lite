@@ -1,164 +1,141 @@
-name: CI
+name: ci
 
-# 只做「格式 + 静态检查 + 单测」，不产出安装包。
-# 发布流程见 release.yml（阶段 5）。
+# 三条流水线之一（ci / installers / release）。
+#
+# ci 只做「不产出安装包」的检查：Rust 静态检查与单测、前端构建、core-host 端到端冒烟。
+# 产包见 installers.yml，发版见 release.yml。
+#
+# 为什么把 core-host 冒烟放进 CI：0.1.0 的教训是「编译全绿、装完不能用」——
+# Rust 侧 117 个单测全部通过，但控制面没把用户配置合并进来、数据面 bridge 找不到 mitmproxy，
+# 这些问题只有跑起来才看得见。这里用 `-NodeEntry` 模式跑（不需要 SEA），
+# 断言链：/healthz → getApiList → server.start → HEAD /pac.js 200 → server.close。
 
 on:
   push:
     branches: [master, main]
-    paths:
-      - "crates/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "rust-toolchain.toml"
-      - ".github/workflows/ci.yml"
   pull_request:
-    paths:
-      - "crates/**"
-      - "Cargo.toml"
-      - "rust-toolchain.toml"
   workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  CORE_BUNDLE_MAX_MB: '70'
 
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  fmt:
-    name: rustfmt
+  # ---------------------------------------------------------------------------
+  # Rust 数据面（路线 4 里是「实验通道」，但代码仍在仓库里，必须保持可编译、单测通过）
+  # ---------------------------------------------------------------------------
+  rust:
     runs-on: windows-latest
-    # 开发机没有 Rust 工具链，无法本地跑 `cargo fmt`，因此格式检查暂不阻断构建。
-    # 这里除了报告差异，还直接跑一次 `cargo fmt --all` 并把补丁作为 artifact 回传
-    # （CI 不能自动提交），本地 `git apply` 一下即可，省去手工格式化整个工程。
-    continue-on-error: true
+    timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
+
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
+          components: rustfmt, clippy
 
-      - name: cargo fmt --check
-        shell: bash
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: '. -> target'
+
+      - name: rustfmt 检查（不阻断，仅回传补丁）
+        shell: pwsh
         run: |
-          set +e
           cargo fmt --all -- --check
-          echo "check_exit=$?" >> "$GITHUB_ENV"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host '::warning::存在未格式化的代码，正在生成补丁 artifact'
+            cargo fmt --all
+            git diff > rustfmt.patch
+          }
+          exit 0
 
-      - name: 生成格式化补丁
-        shell: bash
-        run: |
-          set -e
-          cargo fmt --all
-          git diff > rustfmt.patch || true
-          git status --short >> rustfmt.patch || true
-          echo "--- 补丁大小 ---"
-          wc -c rustfmt.patch || true
-          echo "--- 涉及文件 ---"
-          git diff --stat | tail -n 20 || true
-
-      - name: 回传补丁
+      - name: 回传格式化补丁
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: rustfmt-patch
           path: rustfmt.patch
-          retention-days: 30
+          if-no-files-found: ignore
+          retention-days: 7
 
-  clippy:
-    name: clippy
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v5
-      # boring(BoringSSL) 在 Windows 上需要 nasm 编译汇编文件。
-      - name: 安装 nasm
-        run: choco install nasm -y --no-progress
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: clippy
-      - name: cargo clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: clippy（-D warnings）
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
-  test:
-    name: test
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v5
-      # boring(BoringSSL) 在 Windows 上需要 nasm 编译汇编文件。
-      - name: 安装 nasm
-        run: choco install nasm -y --no-progress
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: test
       - name: cargo test
-        run: cargo test --workspace --all-targets -- --nocapture
-      - name: cargo build (release)
-        run: cargo build --workspace --release
+        run: cargo test --workspace
 
-  # 失败时把编译器原话落到 issue 里。
-  #
-  # 起因：开发机没有 Rust 工具链，Actions 的日志又必须带 token 才能下载，
-  # 于是「编译报错 → 谁去读」成了死循环。这里用 GITHUB_TOKEN 把
-  # `cargo check --message-format=short` 的输出贴进 issue，公开可读、可 grep。
-  diagnose:
-    name: diagnose
+  # ---------------------------------------------------------------------------
+  # 前端（移植过来的原版 view/**）
+  # ---------------------------------------------------------------------------
+  frontend:
     runs-on: windows-latest
-    needs: [clippy, test]
-    if: failure()
-    permissions:
-      contents: read
-      issues: write
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v5
-      # boring(BoringSSL) 在 Windows 上需要 nasm 编译汇编文件。
-      - name: 安装 nasm
-        run: choco install nasm -y --no-progress
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
         with:
-          shared-key: test
+          node-version: '20'
 
-      - name: 收集编译 / clippy / 测试输出
-        shell: bash
+      - name: 安装依赖
+        working-directory: app
+        run: npm install --no-audit --no-fund
+
+      - name: 构建
+        working-directory: app
+        run: npx vite build
+
+      - name: 检查产物体积（>8MB 说明把 core-bundle 之类的静态资源带进前端了）
+        shell: pwsh
         run: |
-          set +e
-          {
-            echo "### cargo check"
-            cargo check --workspace --all-targets --message-format=short --color never 2>&1 | tail -n 40
-            echo "### cargo clippy"
-            cargo clippy --workspace --all-targets --message-format=short --color never 2>&1               | grep -E "^(crates|error|warning: unused)" | head -n 200
-            echo "### cargo test"
-            cargo test --workspace --all-targets --color never 2>&1               | grep -E "^(test result|failures:|---- |thread |error)" | head -n 120
-          } > errors.txt 2>&1
-          cat errors.txt
+          $bytes = (Get-ChildItem app/dist -Recurse -File | Measure-Object Length -Sum).Sum
+          $mb = [math]::Round($bytes / 1MB, 2)
+          Write-Host "dist = $mb MB"
+          if ($mb -gt 8) { throw "前端产物 $mb MB 过大" }
 
-      - name: 提交到 issue
-        shell: bash
+  # ---------------------------------------------------------------------------
+  # core-host + core-bundle 端到端（最能兜住「装完不能用」的一关）
+  # ---------------------------------------------------------------------------
+  core-host:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 取 Node core 源码（sparse clone）
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git clone --depth 1 --filter=blob:none --sparse --branch master `
+            https://github.com/baipinaaa/dev-sidecar-clean.git core-src
+          if ($LASTEXITCODE -ne 0) { throw 'clone core 仓库失败' }
+          git -C core-src sparse-checkout set packages/core packages/mitmproxy packages/gui/extra
+          if (-not (Test-Path 'core-src/packages/gui/extra/sysproxy.exe')) { throw 'core 仓库缺少 gui/extra/sysproxy.exe' }
+
+      - name: 安装 pnpm
+        shell: pwsh
+        run: |
+          npm install -g pnpm@12.14.0 --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { throw '安装 pnpm 失败' }
+
+      - name: 组装 core-bundle（含体积门禁与 require 自检）
+        shell: pwsh
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SHA: ${{ github.sha }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          PNPM_BIN: pnpm
+        run: node scripts/prepare-core-bundle.mjs --dev-sidecar core-src --max-mb $env:CORE_BUNDLE_MAX_MB
+
+      - name: core-host 冒烟（healthz → getApiList → 数据面 /pac.js → close）
+        shell: pwsh
         run: |
-          set -e
-          TITLE='[ci] 编译错误（自动收集）'
-          {
-            echo "commit: \`$SHA\`"
-            echo "run: $RUN_URL"
-            echo ''
-            echo '```'
-            head -c 55000 errors.txt
-            echo '```'
-          } > body.md
-          existing=$(gh issue list --state open --search "$TITLE in:title" --json number --jq '.[0].number' || true)
-          if [ -n "$existing" ]; then
-            gh issue comment "$existing" --body-file body.md
-          else
-            gh issue create --title "$TITLE" --body-file body.md
-          fi
+          [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+          pwsh -File scripts/smoke-core-host.ps1 -NodeEntry core-host/src/main.js -Port 31199 -ProxyPort 31198
+          if ($LASTEXITCODE -ne 0) { throw 'core-host 冒烟失败' }

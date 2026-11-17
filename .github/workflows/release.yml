@@ -1,16 +1,36 @@
 name: release
 
-# 打 tag 才构建：这个 workflow 会往 GitHub Release 发安装包，发错版本影响面较大，
-# 所以只允许 tag 或手工触发（项目没有自动更新通道，装过旧版的用户不会被动升级）。
+# 打 tag 时构建并发布 Windows 安装包（NSIS）。
+#
+# 安装包里必须同时有四个东西，少一个装完就是空壳：
+#   1. ds-proxy.exe         Rust 数据面（实验通道，engine=rust 时才用）
+#   2. ds-core-host.exe     Node SEA 打包的控制面宿主
+#   3. core-bundle/         Node core + mitmproxy + extra（运行时才 require，SEA 打不进去）
+#   4. app/web 前端产物     由 tauri-action 内构建
+#
+# 这里刻意把「组装 core-bundle」和「构建 exe」放在**同一个 step** 里：
+# GitHub runner 在 step 边界会杀后台进程，分开写迟早踩到（上一版就是分开放的，
+# release.yml 里干脆漏了整个 core-bundle 步骤，于是发出去的包必然起不来）。
 on:
   push:
     tags:
       - 'v*'
   workflow_dispatch:
     inputs:
-      tag:
-        description: '要发布的 tag（例如 v0.1.0）'
-        required: true
+      release_tag:
+        description: '要发布的 tag（例如 v0.2.0），留空则只出 artifact 不发 release'
+        required: false
+        default: ''
+        type: string
+      core_repo:
+        description: 'Node core 所在仓库'
+        required: false
+        default: 'baipinaaa/dev-sidecar-clean'
+        type: string
+      core_ref:
+        description: 'Node core 的分支或标签（不能用 commit sha，因为用了 --depth 1）'
+        required: false
+        default: 'master'
         type: string
 
 permissions:
@@ -23,6 +43,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # core-bundle 体积门禁（MB）。超过就往里塞了不该进包的东西，
+  # 与其发个 100MB 的包，不如在 CI 红。
+  CORE_BUNDLE_MAX_MB: '70'
 
 jobs:
   build:
@@ -47,52 +70,98 @@ jobs:
       - name: 安装 Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: '20'
 
-      - name: 构建 Rust 数据面
-        run: cargo build --release --workspace
-
-      - name: 构建控制面（Node SEA）
+      - name: 组装 core-bundle + 构建全部二进制（同一个 step）
         shell: pwsh
+        env:
+          CORE_REPO: ${{ github.event.inputs.core_repo || 'baipinaaa/dev-sidecar-clean' }}
+          CORE_REF: ${{ github.event.inputs.core_ref || 'master' }}
         run: |
-          cd core-host
-          # core-host 本身零依赖；SEA 只打包入口脚本
-          npm ci --no-audit --no-fund --ignore-scripts 2>$null
-          if ($LASTEXITCODE -ne 0) { Write-Host '无 package-lock，跳过 npm ci（core-host 无依赖）' }
-          npm install --no-save postject
-          node scripts/build-sea.js
+          $ErrorActionPreference = 'Stop'
 
-      - name: 摆放 sidecar 二进制
-        shell: pwsh
-        run: pwsh -File scripts/prepare-binaries.ps1
+          Write-Host '== 1/5 取 Node core 源码（sparse clone，只拿用得到的目录）'
+          if (Test-Path core-src) { Remove-Item -Recurse -Force core-src }
+          git clone --depth 1 --filter=blob:none --sparse --branch $env:CORE_REF "https://github.com/$env:CORE_REPO.git" core-src
+          if ($LASTEXITCODE -ne 0) { throw "clone $env:CORE_REPO@$env:CORE_REF 失败" }
+          # packages/gui/extra 里有 sysproxy.exe / EnableLoopback.exe / scripts / pac，缺了系统代理和证书都动不了
+          git -C core-src sparse-checkout set packages/core packages/mitmproxy packages/gui/extra
+          if ($LASTEXITCODE -ne 0) { throw 'sparse-checkout 失败' }
+          if (-not (Test-Path 'core-src/packages/core/package.json')) { throw 'core-src 不完整' }
+          if (-not (Test-Path 'core-src/packages/mitmproxy/package.json')) { throw 'core-src 缺少 mitmproxy（engine=node 不可用）' }
+          if (-not (Test-Path 'core-src/packages/gui/extra/sysproxy.exe')) { throw 'core-src 缺少 gui/extra/sysproxy.exe' }
 
-      - name: 安装前端依赖
-        working-directory: app
-        run: npm install --no-audit --no-fund
+          Write-Host '== 2/5 准备 pnpm（core 仓库的 workspace 用 workspace:* 协议，npm 装不了）'
+          $pnpmVersion = '12.14.0'   # 与 dev-sidecar 的 packageManager 字段一致
+          npm install -g "pnpm@$pnpmVersion" --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { throw '安装 pnpm 失败' }
 
-      - name: 构建并发布（NSIS 安装包）
+          Write-Host '== 3/5 组装 core-bundle（pnpm 解析版本冲突 → 真实文件树 → 体积门禁 → require 自检）'
+          $env:PNPM_BIN = 'pnpm'
+          node scripts/prepare-core-bundle.mjs --dev-sidecar core-src --max-mb $env:CORE_BUNDLE_MAX_MB
+          if ($LASTEXITCODE -ne 0) { throw 'core-bundle 组装/自检失败' }
+
+          Write-Host '== 4/5 构建 Rust 数据面与控制面'
+          cargo build --release --workspace
+          if ($LASTEXITCODE -ne 0) { throw 'cargo build 失败' }
+          npm install -g postject --no-audit --no-fund
+          node core-host/scripts/build-sea.js
+          if ($LASTEXITCODE -ne 0) { throw 'Node SEA 构建失败' }
+
+          Write-Host '== 5/5 摆放 sidecar 二进制（缺文件直接失败，不允许静默跳过）'
+          pwsh -File scripts/prepare-binaries.ps1 -Strict
+          if ($LASTEXITCODE -ne 0) { throw 'sidecar 二进制缺失' }
+
+          Write-Host '== 组装结果'
+          Get-ChildItem app/src-tauri/binaries | Select-Object Name,Length | Format-Table -AutoSize | Out-String | Write-Host
+          $bundleMb = [math]::Round(((Get-ChildItem app/src-tauri/core-bundle -Recurse -File | Measure-Object Length -Sum).Sum / 1MB), 1)
+          Write-Host "core-bundle = $bundleMb MB（门禁 $env:CORE_BUNDLE_MAX_MB MB）"
+
+      - name: 构建前端并打包安装包
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           projectPath: app
-          tagName: ${{ github.event.inputs.tag || github.ref_name }}
-          releaseName: 'DevSidecar Lite ${{ github.event.inputs.tag || github.ref_name }}'
+          tagName: ${{ github.event.inputs.release_tag || github.ref_name }}
+          releaseName: 'DevSidecar Lite ${{ github.event.inputs.release_tag || github.ref_name }}'
           releaseBody: |
             见 [`docs/MIGRATE-FROM-ELECTRON.md`](docs/MIGRATE-FROM-ELECTRON.md)。
 
             - 首次安装需要装根证书（开启「系统代理」或「PAC 分流」时会提示）
             - 从 Electron 版迁移请先卸载旧版，两者会争抢 127.0.0.1:31181
+            - 默认数据面是 Node（与原版一致），Rust 数据面是实验通道（设置里把 proxy.engine 改成 rust）
           releaseDraft: true
           prerelease: false
           args: --target x86_64-pc-windows-msvc
 
-      - name: 上传基准测试脚本（便于用户自查）
+      - name: 校验安装包确实生成了
+        id: find
+        shell: pwsh
+        run: |
+          $found = Get-ChildItem -Recurse -File -Include *-setup.exe -Path `
+            'app/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis', `
+            'app/src-tauri/target/release/bundle/nsis' -ErrorAction SilentlyContinue |
+            Sort-Object Length -Descending
+          if (-not $found) { throw '没有生成 NSIS 安装包' }
+          $found | Select-Object FullName,@{n='MB';e={[math]::Round($_.Length/1MB,1)}} | Format-Table -AutoSize | Out-String | Write-Host
+          "path=$($found[0].FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      # 装一遍再发：0.1.0 就是「编译全绿、装完空壳」，光看产物存在说明不了任何问题
+      - name: 安装冒烟（装包 → 布局 → healthz → getApiList → /pac.js → 卸载）
+        shell: pwsh
+        run: |
+          [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+          pwsh -File scripts/smoke-installer.ps1 -Installer '${{ steps.find.outputs.path }}'
+          if ($LASTEXITCODE -ne 0) { throw '安装冒烟失败' }
+
+      - name: 上传安装包
         uses: actions/upload-artifact@v4
         with:
-          name: bench-scripts
-          path: |
-            tests/e2e/bench.ps1
-            tests/e2e/smoke.ps1
-            tests/e2e/cf_acceptance.ps1
+          name: windows-installer
+          if-no-files-found: error
           retention-days: 14
+          path: |
+            app/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+            app/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.sig
+            app/src-tauri/target/release/bundle/nsis/*.exe

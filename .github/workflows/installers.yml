@@ -1,208 +1,129 @@
 name: installers
 
-# 在 GitHub 上打出 Windows 安装包（NSIS）。
+# 三条流水线之一（ci / installers / release）。
 #
-# 需要的三块产物：
-#   1. ds-proxy.exe        —— Rust 数据面
-#   2. ds-core-host.exe    —— Node SEA 打包的控制面宿主
-#   3. app/（Tauri 2 壳）  —— 通过 externalBin 把上面两个塞进安装包
+# 这里产出一个**可安装、可运行**的 NSIS 安装包，并且当场装一遍验证，不发 release。
+# 与 release.yml 的区别只有两点：不发布、不要求 tag。
 #
-# 注意：ds-core-host 走 Node SEA，只把入口脚本打进可执行文件；它运行时要 `require`
-# `@blue-frontier/dev-sidecar`（Node core）与它的 12 个依赖。所以本 workflow 会去
-# `core_repo`（默认 baipinaaa/dev-sidecar-clean）按 `core_ref` sparse-clone 出
-# `packages/core`，装好运行时依赖后放进 `app/src-tauri/core-bundle/`，
-# 由 Tauri 打到 `$INSTDIR/resources/core-bundle/`。
-# 最后用 scripts/smoke-core-host.ps1 以「安装包形态」跑一次，确认 core 真能加载。
+# 历史教训（0.1.0）：这个文件以前用 robocopy 自己拼 core-bundle，而 release.yml 里
+# 压根没有组装步骤 —— 两个文件各写一套、慢慢就漂了。现在两边都只调
+# `scripts/prepare-core-bundle.mjs` + `scripts/prepare-binaries.ps1 -Strict`。
+
 on:
-  workflow_dispatch:
-    inputs:
-      release_tag:
-        description: '打完包后以此 tag 建一个 draft release（留空只出 artifact）'
-        required: false
-        default: ''
-        type: string
-      core_repo:
-        description: 'Node core 所在仓库（控制面运行时依赖）'
-        required: false
-        default: 'baipinaaa/dev-sidecar-clean'
-        type: string
-      core_ref:
-        description: 'Node core 的分支或标签（不能是 commit sha，因为用了 --depth 1）'
-        required: false
-        default: 'master'
-        type: string
-      include_mitmproxy:
-        description: '是否一并打包 mitmproxy：core 源码直接 require 它，必须为 true'
-        required: false
-        default: 'true'
-        type: choice
-        options:
-          - 'false'
-          - 'true'
   push:
-    tags:
-      - 'v*'
+    branches: [master, main]
+    paths:
+      - 'core-host/**'
+      - 'app/**'
+      - 'crates/**'
+      - 'scripts/**'
+      - '.github/workflows/installers.yml'
+  pull_request:
+    paths:
+      - 'core-host/**'
+      - 'app/**'
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: installers-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CORE_BUNDLE_MAX_MB: '70'
 
 jobs:
-  windows-installer:
+  build:
     runs-on: windows-latest
-    timeout-minutes: 60
-
+    timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
-
-      - name: 安装 Node 20
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
+      - name: 检出代码
+        uses: actions/checkout@v4
 
       - name: 安装 Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
 
-      - uses: Swatinem/rust-cache@v2
+      - name: 缓存 cargo
+        uses: Swatinem/rust-cache@v2
         with:
           workspaces: '. -> target'
 
-      - name: 生成占位图标（仓库不提交二进制图标）
-        run: python scripts/gen-icons.py
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
 
-      - name: 构建数据面 ds-proxy
-        run: cargo build --release -p ds-proxy
-
-      - name: 构建控制面 ds-core-host（Node SEA）
+      - name: 组装 core-bundle + 构建全部二进制（同一个 step）
+        shell: pwsh
         run: |
-          npm install -g postject
+          $ErrorActionPreference = 'Stop'
+
+          Write-Host '== 1/5 取 Node core 源码'
+          if (Test-Path core-src) { Remove-Item -Recurse -Force core-src }
+          git clone --depth 1 --filter=blob:none --sparse --branch master `
+            https://github.com/baipinaaa/dev-sidecar-clean.git core-src
+          if ($LASTEXITCODE -ne 0) { throw 'clone core 仓库失败' }
+          git -C core-src sparse-checkout set packages/core packages/mitmproxy packages/gui/extra
+          if (-not (Test-Path 'core-src/packages/gui/extra/sysproxy.exe')) { throw 'core 仓库缺少 gui/extra/sysproxy.exe' }
+
+          Write-Host '== 2/5 安装 pnpm'
+          npm install -g pnpm@12.14.0 --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { throw '安装 pnpm 失败' }
+
+          Write-Host '== 3/5 组装 core-bundle'
+          $env:PNPM_BIN = 'pnpm'
+          node scripts/prepare-core-bundle.mjs --dev-sidecar core-src --max-mb $env:CORE_BUNDLE_MAX_MB
+          if ($LASTEXITCODE -ne 0) { throw 'core-bundle 组装失败' }
+
+          Write-Host '== 4/5 构建 Rust + Node SEA'
+          cargo build --release --workspace
+          if ($LASTEXITCODE -ne 0) { throw 'cargo build 失败' }
+          npm install -g postject --no-audit --no-fund
           node core-host/scripts/build-sea.js
+          if ($LASTEXITCODE -ne 0) { throw 'Node SEA 构建失败' }
 
-      - name: 放置 sidecar 二进制
-        shell: pwsh
-        run: pwsh -File scripts/prepare-binaries.ps1
+          Write-Host '== 5/5 摆放 sidecar（缺文件直接失败）'
+          pwsh -File scripts/prepare-binaries.ps1 -Strict
+          if ($LASTEXITCODE -ne 0) { throw 'sidecar 二进制缺失' }
 
-      - name: 拉取 Node core 并装运行时依赖
-        shell: pwsh
-        run: |
-          # SEA 只把入口脚本打进 ds-core-host.exe，core 是运行时 require 的，
-          # 必须随安装包放到 resources/core-bundle/packages/core，否则控制面起不来。
-          $repo = '${{ github.event.inputs.core_repo }}'
-          if ([string]::IsNullOrWhiteSpace($repo)) { $repo = 'baipinaaa/dev-sidecar-clean' }
-          $ref = '${{ github.event.inputs.core_ref }}'
-          if ([string]::IsNullOrWhiteSpace($ref)) { $ref = 'master' }
-          # mitmproxy 必须打包：core 的 config/local-config-loader.js 等 7 处直接
-          # require('@blue-frontier/mitmproxy/src/json')，缺了控制面直接起不来。
-          $withMitm = '${{ github.event.inputs.include_mitmproxy }}' -ne 'false'
-          Write-Host "core 仓库 = $repo @ $ref（mitmproxy: $withMitm）"
-
-          $paths = @('packages/core')
-          if ($withMitm) { $paths += 'packages/mitmproxy' }
-          git clone --depth 1 --filter=blob:none --sparse --branch $ref "https://github.com/$repo.git" core-src
-          if ($LASTEXITCODE -ne 0) { throw "clone $repo@$ref 失败" }
-          git -C core-src sparse-checkout set @paths
-          if ($LASTEXITCODE -ne 0) { throw 'sparse-checkout 失败' }
-
-          # 必须 cd 进去再装：npm 的 --prefix 在 npm 11 上仍会读当前目录的 package.json，
-          # 仓库根没有 package.json，直接报 ENOENT。
-          foreach ($pkg in $paths) {
-            $dir = Join-Path (Get-Location) "core-src/$pkg"
-            if (-not (Test-Path (Join-Path $dir 'package.json'))) {
-              throw "包目录不完整：$dir（ref=$ref 是否存在？）"
-            }
-            Push-Location $dir
-            try {
-              if ($pkg -eq 'packages/mitmproxy') {
-                # monorepo 内部依赖用的是 pnpm 的 workspace:* 协议，npm 不支持，
-                # 这里把这类依赖从副本里剔掉再装（它运行时用 core-bundle 里的那份）。
-                node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));for(const k of Object.keys(p.dependencies||{})){if(String(p.dependencies[k]).startsWith('workspace:'))delete p.dependencies[k]};fs.writeFileSync('package.json',JSON.stringify(p,null,2))"
-              }
-              npm install --omit=dev --no-audit --no-fund
-              if ($LASTEXITCODE -ne 0) { throw "$pkg 依赖安装失败" }
-            } finally {
-              Pop-Location
-            }
-            Write-Host "依赖已安装：$dir/node_modules"
-          }
-          $global:LASTEXITCODE = 0
-
-      - name: 把 core 放进安装包资源目录
-        shell: pwsh
-        run: |
-          # 必须与 tauri.conf.json 的 bundle.resources（core-bundle/**）以及
-          # core-host 的解析路径（<安装目录>/resources/core-bundle/packages/core）对齐，
-          # 否则打进去也加载不到。
-          $dest = 'app/src-tauri/core-bundle/packages/core'
-          New-Item -ItemType Directory -Force -Path $dest | Out-Null
-          # 排除测试与缓存，避免把体积撑大
-          robocopy core-src/packages/core $dest /E /NFL /NDL /NJH /NJS `
-            /XD core-src/packages/core/test core-src/packages/core/.cache | Out-Null
-          if ($LASTEXITCODE -ge 8) { throw "robocopy(core) 失败，退出码 $LASTEXITCODE" }
-
-          if (Test-Path 'core-src/packages/mitmproxy/package.json') {
-            $mitmDest = 'app/src-tauri/core-bundle/packages/mitmproxy'
-            New-Item -ItemType Directory -Force -Path $mitmDest | Out-Null
-            robocopy core-src/packages/mitmproxy $mitmDest /E /NFL /NDL /NJH /NJS `
-              /XD core-src/packages/mitmproxy/test core-src/packages/mitmproxy/.cache | Out-Null
-            if ($LASTEXITCODE -ge 8) { throw "robocopy(mitmproxy) 失败，退出码 $LASTEXITCODE" }
-          } else {
-            Write-Host '未打包 mitmproxy（engine=node 回退将不可用）' -ForegroundColor Yellow
-          }
-          $size = [math]::Round(((Get-ChildItem $dest -Recurse -File | Measure-Object Length -Sum).Sum / 1MB), 1)
-          Write-Host "core 资源目录: $dest（${size} MB）"
-          Copy-Item core-src/packages/core/package.json $dest/package.json -Force
-
-          # shim 必须留在磁盘上（core 会 fork 它），不能打进 SEA
-          $shimDest = 'app/src-tauri/core-bundle/core-host/shim'
-          New-Item -ItemType Directory -Force -Path $shimDest | Out-Null
-          Copy-Item core-host/shim/*.js $shimDest -Force
-          if (-not (Test-Path "$dest/package.json")) { throw 'core 的 package.json 不存在，require 会失败' }
-
-          # robocopy 成功时返回 1（= 有文件被复制），Actions 会把最后一条原生命令的退出码
-          # 当作步骤退出码，导致步骤被判失败，所以这里显式归零。
-          $global:LASTEXITCODE = 0
-          exit 0
-
-      - name: 冒烟 core-host（验证安装包形态能加载 core）
-        shell: pwsh
-        run: pwsh -File scripts/smoke-core-host.ps1
-
-      - name: 安装前端依赖
-        working-directory: app
-        run: npm install
-
-      - name: 打包
+      - name: 打包安装包
         uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           projectPath: app
           args: --target x86_64-pc-windows-msvc
-          tagName: ${{ github.event.inputs.release_tag }}
-          releaseName: ${{ github.event.inputs.release_tag }}
-          releaseDraft: true
+
+      - name: 找到安装包
+        id: find
+        shell: pwsh
+        run: |
+          $found = Get-ChildItem -Recurse -File -Include *-setup.exe -Path `
+            'app/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis', `
+            'app/src-tauri/target/release/bundle/nsis' -ErrorAction SilentlyContinue |
+            Sort-Object Length -Descending | Select-Object -First 1
+          if (-not $found) { throw '没有生成 NSIS 安装包' }
+          Write-Host "安装包：$($found.FullName)（$([math]::Round($found.Length/1MB,1)) MB）"
+          "path=$($found.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "size=$([math]::Round($found.Length/1MB,1))" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: 安装冒烟（装包 → 布局 → healthz → getApiList → /pac.js → 卸载）
+        shell: pwsh
+        run: |
+          [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+          pwsh -File scripts/smoke-installer.ps1 -Installer '${{ steps.find.outputs.path }}'
+          if ($LASTEXITCODE -ne 0) { throw '安装冒烟失败' }
 
       - name: 上传安装包
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: windows-installer
-          if-no-files-found: warn
+          if-no-files-found: error
+          retention-days: 14
           path: |
             app/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
-            app/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.sig
             app/src-tauri/target/release/bundle/nsis/*.exe
-
-      - name: 打印产物清单
-        if: always()
-        shell: pwsh
-        run: |
-          if (-not (Test-Path 'app/src-tauri/target')) {
-            Write-Host '没有 target 目录（打包未走到这一步）'
-            exit 0
-          }
-          Get-ChildItem -Recurse -Include *.exe,*.msi,*.sig -Path app/src-tauri/target -ErrorAction SilentlyContinue |
-            Where-Object { $_.FullName -like '*bundle*' } |
-            Select-Object @{n='文件';e={$_.Name}}, @{n='大小MB';e={[math]::Round($_.Length/1MB,1)}} |
-            Format-Table -AutoSize
