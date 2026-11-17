@@ -285,8 +285,14 @@ try {
     $invokeRaw = {
         param([string]$api, $param = $null)
         $body = @{ api = $api; param = $param } | ConvertTo-Json -Compress -Depth 12
-        (Invoke-WebRequest -Uri "$base/invoke" -Method Post -Headers $headers `
-                -ContentType 'application/json' -Body $body -TimeoutSec 60 -NoProxy).Content
+        try {
+            (Invoke-WebRequest -Uri "$base/invoke" -Method Post -Headers $headers `
+                    -ContentType 'application/json' -Body $body -TimeoutSec 120 -NoProxy).Content
+        } catch {
+            # 500 时 Invoke-WebRequest 只抛状态码，真正的错误在响应体里
+            $resp = $_.ErrorDetails.Message
+            if ($resp) { $resp } else { throw }
+        }
     }
     $invoke = {
         param([string]$api, $param = $null)
