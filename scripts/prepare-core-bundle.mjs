@@ -96,6 +96,57 @@ function removeSymlinks (dir) {
   }
 }
 
+function countFiles (dir) {
+  let total = 0
+  const stack = [dir]
+  while (stack.length) {
+    const current = stack.pop()
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const full = path.join(current, entry.name)
+      if (entry.isDirectory()) stack.push(full)
+      else if (entry.isFile()) total += 1
+    }
+  }
+  return total
+}
+
+/// node_modules 里有一半文件运行时根本不会碰：文档、sourcemap、测试用例、示例。
+/// 安装后用户看到 4000+ 个小文件，观感极差，也没必要。
+/// 只删「确定不会被 require」的东西，宁少不多：
+/// - 目录：test/tests/__tests__/example/examples/doc/docs/coverage/.github/benchmark(s)
+/// - 文件：*.md（LICENSE 除外）、*.map、CHANGELOG*、.eslintrc*、.eslintignore、*.tsbuildinfo
+/// 不删 *.ts / *.yml / *.json：有些包会运行时读它们。
+const PRUNE_DIRS = new Set([
+  'test', 'tests', '__tests__', 'example', 'examples', 'doc', 'docs',
+  'coverage', '.github', 'benchmark', 'benchmarks',
+])
+const PRUNE_FILE_RE = /(\.md$|\.markdown$|\.map$|\.tsbuildinfo$|^\.eslintrc|^\.eslintignore$|^CHANGELOG)/i
+
+function pruneNodeModules (root) {
+  let dirs = 0
+  let files = 0
+  const stack = [root]
+  while (stack.length) {
+    const current = stack.pop()
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const full = path.join(current, entry.name)
+      if (entry.isDirectory()) {
+        if (PRUNE_DIRS.has(entry.name)) {
+          files += countFiles(full)
+          fs.rmSync(full, { recursive: true, force: true })
+          dirs += 1
+        } else {
+          stack.push(full)
+        }
+      } else if (entry.isFile() && PRUNE_FILE_RE.test(entry.name) && !/^license/i.test(entry.name)) {
+        fs.rmSync(full, { force: true })
+        files += 1
+      }
+    }
+  }
+  return { dirs, files }
+}
+
 function dirSize (dir) {
   let total = 0
   const stack = [dir]
@@ -241,6 +292,17 @@ function main () {
 
     // 3.3 清掉残留的符号链接与空的 .bin（Tauri/NSIS 打包时会丢链接）
     removeSymlinks(depsOut)
+
+    // 3.4 修剪文档/测试/示例/sourcemap：安装后文件数从 4000+ 降到 3000 以内
+    {
+      const before = countFiles(depsOut)
+      const removed = pruneNodeModules(depsOut)
+      const after = countFiles(depsOut)
+      console.log(
+        `[core-bundle] 修剪 node_modules: ${before} -> ${after} 文件` +
+        `（删 ${removed.files} 个文件 / ${removed.dirs} 个测试示例目录）`,
+      )
+    }
     // 4) extra/：sysproxy.exe、EnableLoopback.exe、scripts/、proxy/、pac/
     copyTree(path.join(opts.devSidecar, 'packages', 'gui', 'extra'), path.join(opts.out, 'extra'))
 
