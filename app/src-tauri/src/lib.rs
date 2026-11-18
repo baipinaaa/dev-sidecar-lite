@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::Mutex as AsyncMutex;
@@ -393,9 +393,11 @@ async fn stream_events(app: &AppHandle, core: &CoreClient, url: &str) -> Result<
 
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
-    let server = CheckMenuItem::with_id(app, "toggle_server", "代理服务", true, false, None::<&str>)?;
-    let proxy = CheckMenuItem::with_id(app, "toggle_proxy", "系统代理", true, false, None::<&str>)?;
-    let pac = CheckMenuItem::with_id(app, "toggle_pac", "PAC 分流", true, false, None::<&str>)?;
+    // 不用 CheckMenuItem：勾选状态得由前端
+    // 的实时状态回写，否则菜单里永远显示「全部未开启」，比不给勾选更误导。
+    let server = MenuItem::with_id(app, "toggle_server", "切换 代理服务", true, None::<&str>)?;
+    let proxy = MenuItem::with_id(app, "toggle_proxy", "切换 系统代理", true, None::<&str>)?;
+    let pac = MenuItem::with_id(app, "toggle_pac", "切换 PAC 分流", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
 
     let menu = Menu::with_items(
@@ -411,7 +413,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         ],
     )?;
 
-    let _tray = TrayIconBuilder::with_id("main-tray")
+    let tray = TrayIconBuilder::with_id("main-tray")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .tooltip("DevSidecar Lite")
@@ -443,7 +445,14 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             let _ = app.emit("tray-toggle", json!({ "key": api }));
         })
         .on_tray_icon_event(|tray, event| {
-            if let tauri::tray::TrayIconEvent::Click { .. } = event {
+            // 只在**左键**按下时显示窗口。以前不区分按键，右键也会走到这里，
+            // 于是右键先把窗口弹出来、菜单又弹一下——看起来就是「右键没反应」。
+            if let tauri::tray::TrayIconEvent::Click {
+                button: tauri::tray::MouseButton::Left,
+                button_state: tauri::tray::MouseButtonState::Up,
+                ..
+            } = event
+            {
                 let app = tray.app_handle();
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.show();
@@ -453,7 +462,19 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         })
         .build(app)?;
 
+    // TrayIcon 必须在整个生命周期内持有：以前这里是 `let _tray = …`，
+    // 函数一返回就 drop，图标被移除——托盘菜单自然「点什么都没反应」。
+    app.manage(TrayHandle { tray, menu });
+
     Ok(())
+}
+
+/// 持有托盘图标与菜单（drop 即移除图标，右键菜单也跟着没反应）。
+struct TrayHandle {
+    #[allow(dead_code)]
+    tray: tauri::tray::TrayIcon,
+    #[allow(dead_code)]
+    menu: Menu<tauri::Wry>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

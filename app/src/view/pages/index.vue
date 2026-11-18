@@ -70,11 +70,33 @@ export default {
     })
   },
   mounted () {
+    // 托盘里的「切换 xxx」→ 复用首页开关的同一套逻辑（互斥/持久化/重启数据面）。
+    this._onTrayToggle = (event) => this.onTrayToggle(event)
+    window.addEventListener('dev-sidecar:tray-toggle', this._onTrayToggle)
+
     // 【本版本定制】已移除启动时自动检查更新。
     // 原实现会在代理服务就绪后自动请求 GitHub API 检查新版本，属于应用自行发起的网络请求；
     // 现改为仅在用户主动点击「检查更新」按钮（doCheckUpdate(true)）时才执行。
   },
+  beforeDestroy () {
+    if (this._onTrayToggle) {
+      window.removeEventListener('dev-sidecar:tray-toggle', this._onTrayToggle)
+    }
+  },
   methods: {
+    /** 托盘里点了「切换 xxx」：按当前状态取反，交给 checkbox 同一套处理 */
+    onTrayToggle (event) {
+      const key = event?.detail?.key
+      const btn = this.switchBtns?.[key]
+      if (!btn || typeof btn.doClick !== 'function') {
+        return
+      }
+      if (btn.loading) {
+        return
+      }
+      btn.doClick(!btn.status())
+    },
+
     /** 按模式写入拦截/测速开关（首页模式选择，已移除「增强模式/ow」） */
     applyMode (mode) {
       if (mode === 'safe') {

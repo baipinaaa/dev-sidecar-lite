@@ -132,6 +132,12 @@ export function apiInit (app) {
   }
 
   if (!inited) {
+    // 托盘的「切换 xxx」由 Rust 侧 emit 过来，这里转成 window 事件交给首页接管：
+    // 开关逻辑（互斥、持久化、重启数据面）都在页面里，托盘不重复实现一套。
+    subscribe('tray-toggle', (payload) => {
+      window.dispatchEvent(new CustomEvent('dev-sidecar:tray-toggle', { detail: payload }))
+    }).catch(() => {})
+
     return invoke('getApiList').then((list) => {
       inited = true
       for (const item of list) {
