@@ -26,6 +26,42 @@ impl Default for CoreProcess {
     }
 }
 
+/// 控制面的 stdout/stderr 落盘。
+///
+/// 之前这里是 `Stdio::null()`：core-host 崩了、插件报错了、端口占了，全都随风而逝，
+/// 用户只说得出「点了没反应」，我们只能靠 CDP 一步步翻——这就是代价。
+fn log_sink() -> Stdio {
+    let dir = std::env::var("PROGRAMDATA")
+        .map(|base| PathBuf::from(base).join("dev-sidecar-lite").join("log"))
+        .or_else(|_| {
+            std::env::var("USERPROFILE")
+                .map(|base| PathBuf::from(base).join(".dev-sidecar-lite").join("log"))
+        });
+    let Ok(dir) = dir else {
+        return Stdio::null();
+    };
+    if std::fs::create_dir_all(&dir).is_err() {
+        return Stdio::null();
+    }
+
+    let path = dir.join("core-host.log");
+    // 长期使用会无限增长，超过 8 MB 就轮转一份（只留一代，够定位最近一次问题）
+    if let Ok(meta) = std::fs::metadata(&path) {
+        if meta.len() > 8 * 1024 * 1024 {
+            let _ = std::fs::rename(&path, dir.join("core-host.log.1"));
+        }
+    }
+
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        Ok(file) => Stdio::from(file),
+        Err(_) => Stdio::null(),
+    }
+}
+
 impl CoreProcess {
     pub fn new() -> Self {
         Self {
@@ -60,8 +96,8 @@ impl CoreProcess {
                 "--no-startup",
             ])
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stdout(log_sink())
+            .stderr(log_sink());
 
         #[cfg(windows)]
         {

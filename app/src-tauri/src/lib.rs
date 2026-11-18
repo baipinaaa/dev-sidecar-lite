@@ -12,7 +12,7 @@
 mod core_proc;
 mod legacy;
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -27,7 +27,11 @@ const DEFAULT_CORE_HOST: &str = "http://127.0.0.1:31190";
 #[derive(Debug, Clone)]
 struct CoreClient {
     base_url: String,
-    token: Option<String>,
+    /// core-host 是本进程拉起来的，token 文件在**它启动之后**才存在。
+    /// 若启动时读一次就定死，首次安装必然是 `None`：`/invoke` 每次重读盘所以没事，
+    /// 但 SSE 那条长连接会一直带空 token 被 401 拒绝，重连多少次都一样 ——
+    /// 界面症状就是「点什么都没反应」（后端其实已经在动）。
+    token: Arc<RwLock<Option<String>>>,
     http: reqwest::Client,
 }
 
@@ -40,26 +44,62 @@ impl CoreClient {
             .no_proxy()
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
-        Self { base_url, token, http }
+        Self {
+            base_url,
+            token: Arc::new(RwLock::new(token)),
+            http,
+        }
+    }
+
+    /// 取 token：缓存命中直接用，否则读一次盘并回填。
+    fn token(&self) -> Option<String> {
+        if let Ok(guard) = self.token.read() {
+            if let Some(token) = guard.as_ref() {
+                return Some(token.clone());
+            }
+        }
+        let from_disk = read_token_file()?;
+        if let Ok(mut guard) = self.token.write() {
+            *guard = Some(from_disk.clone());
+        }
+        Some(from_disk)
     }
 
     async fn call(&self, api: &str, param: Option<Value>) -> Result<Value, String> {
         let url = format!("{}/invoke", self.base_url.trim_end_matches('/'));
-        let mut request = self
-            .http
-            .post(&url)
-            .json(&json!({ "api": api, "param": param.unwrap_or(Value::Null) }));
 
-        // token 惰性读取：core-host 由本进程启动，首次调用时凭据文件才刚生成
-        let token = self.token.clone().or_else(read_token_file);
-        if let Some(token) = token {
-            request = request.bearer_auth(token);
+        // core-host 是本进程拉起来的，首次启动要等它监听（Defender 扫 69MB 的 exe 要几秒）。
+        // 以前这里是「一发定生死」，抢在启动窗口里就报「core-host 不可达」，
+        // 前端 boot 阶段拿到它就直接画红屏——所以这里重试几次。
+        let mut last_err = String::new();
+        let mut response = None;
+        for attempt in 0..4u32 {
+            let mut request = self
+                .http
+                .post(&url)
+                .json(&json!({ "api": api, "param": param.clone().unwrap_or(Value::Null) }));
+
+            if let Some(token) = self.token() {
+                request = request.bearer_auth(token);
+            }
+
+            match request.send().await {
+                Ok(resp) => {
+                    response = Some(resp);
+                    break;
+                }
+                Err(err) => {
+                    last_err = format!("core-host 不可达（{url}）：{err}");
+                    if attempt < 3 {
+                        tokio::time::sleep(Duration::from_millis(700)).await;
+                    }
+                }
+            }
         }
 
-        let response = request
-            .send()
-            .await
-            .map_err(|err| format!("core-host 不可达（{url}）：{err}"))?;
+        let Some(response) = response else {
+            return Err(last_err);
+        };
 
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
@@ -76,6 +116,56 @@ impl CoreClient {
             return Ok(Value::Null);
         }
         serde_json::from_str(&text).or_else(|_| Ok(Value::String(text)))
+    }
+}
+
+/// 退出时同步地把系统代理关掉。
+///
+/// 不能用 reqwest：这个回调是同步的，而 `block_on` 在 Tauri 的运行时里会 panic。
+/// 所以手写一个最小 HTTP/1.1 POST —— 只需要知道有没有 200。
+fn restore_system_proxy(core: &CoreClient) {
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpStream};
+
+    let Some(token) = core.token() else {
+        return;
+    };
+
+    let host_port = core
+        .base_url
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    let Ok(socket) = host_port.parse::<SocketAddr>() else {
+        return;
+    };
+    let Ok(mut stream) = TcpStream::connect_timeout(&socket, Duration::from_millis(500)) else {
+        return;
+    };
+
+    let body = r#"{"api":"proxy.close","param":null}"#;
+    let request = format!(
+        "POST /invoke HTTP/1.1\r\nHost: {host_port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+    if stream.write_all(request.as_bytes()).is_err() {
+        return;
+    }
+
+    let mut response = String::new();
+    let _ = stream.read_to_string(&mut response);
+    if response.starts_with("HTTP/1.1 200") {
+        tracing::info!("退出前已还原系统代理");
+    } else {
+        tracing::warn!(
+            head = %response.lines().next().unwrap_or_default(),
+            "退出前还原系统代理失败"
+        );
     }
 }
 
@@ -245,7 +335,7 @@ async fn stream_events(app: &AppHandle, core: &CoreClient, url: &str) -> Result<
     use futures_util::StreamExt;
 
     let mut request = core.http.get(url);
-    if let Some(token) = core.token.as_ref() {
+    if let Some(token) = core.token() {
         request = request.bearer_auth(token);
     }
 
@@ -424,7 +514,11 @@ pub fn run() {
         .expect("构建 Tauri 应用失败")
         .run(|handle, event| {
             if let tauri::RunEvent::Exit = event {
-                handle.state::<AppState>().core_proc.stop();
+                // 退出前把系统代理还原：否则注册表里留着 ProxyEnable=1 + 127.0.0.1:31181，
+                // 而数据面已经没了 —— 用户下次开机直接没网，还会以为是软件坏了。
+                let state = handle.state::<AppState>();
+                restore_system_proxy(&state.core);
+                state.core_proc.stop();
             }
         });
 }
