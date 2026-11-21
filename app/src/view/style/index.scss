@@ -193,3 +193,19 @@ hr {
     font-family: Consolas, arial, serif;
   }
 }
+
+/* ---- 滚动条 ----
+   WebView2 的默认滚动条是浅色宽条（轨道纯白）。左侧菜单是 overflow-y: auto，
+   窗口一矮就出滚动条，在暗色主题下就是一条贯穿整个窗口的大白边。
+   原版 Electron 没写任何滚动条样式，只是窗口更高、菜单没溢出才没暴露出来。
+   这里按 data-theme 统一着色，轨道透明，让底色透出来。 */
+html,
+html * {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.25) transparent;
+}
+
+html[data-theme='light'],
+html[data-theme='light'] * {
+  scrollbar-color: rgba(0, 0, 0, 0.25) transparent;
+}
