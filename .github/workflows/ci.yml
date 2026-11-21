@@ -43,25 +43,17 @@ jobs:
         with:
           workspaces: '. -> target'
 
-      - name: rustfmt 检查（不阻断，仅回传补丁）
+      - name: rustfmt 检查（不阻断，差异直接打日志）
         shell: pwsh
         run: |
           cargo fmt --all -- --check
           if ($LASTEXITCODE -ne 0) {
-            Write-Host '::warning::存在未格式化的代码，正在生成补丁 artifact'
+            Write-Host '::warning::存在未格式化的代码，下面是 cargo fmt 的差异（本地执行 cargo fmt --all 即可修好）'
             cargo fmt --all
-            git diff > rustfmt.patch
+            git --no-pager diff --stat
+            git --no-pager diff
           }
           exit 0
-
-      - name: 回传格式化补丁
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: rustfmt-patch
-          path: rustfmt.patch
-          if-no-files-found: ignore
-          retention-days: 7
 
       - name: clippy（-D warnings）
         run: cargo clippy --workspace --all-targets -- -D warnings

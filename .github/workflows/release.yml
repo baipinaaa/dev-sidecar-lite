@@ -18,7 +18,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: '要发布的 tag（例如 v0.2.0），留空则只出 artifact 不发 release'
+        description: '要发布的 tag（例如 v0.3.0）；tag 触发时自动取 tag 名'
         required: false
         default: ''
         type: string
@@ -123,23 +123,11 @@ jobs:
         working-directory: app
         run: npm install --no-audit --no-fund
 
+      # 只构建，不发布：先让冒烟跑完，再决定要不要发 release。
+      # 用 tauri-action 的话「构建」和「发布」是一体的，冒烟失败时 release 已经挂在外面了。
       - name: 构建前端并打包安装包
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          projectPath: app
-          tagName: ${{ github.event.inputs.release_tag || github.ref_name }}
-          releaseName: 'DevSidecar Lite ${{ github.event.inputs.release_tag || github.ref_name }}'
-          releaseBody: |
-            见 [`docs/MIGRATE-FROM-ELECTRON.md`](docs/MIGRATE-FROM-ELECTRON.md)。
-
-            - 首次安装需要装根证书（开启「系统代理」或「PAC 分流」时会提示）
-            - 从 Electron 版迁移请先卸载旧版，两者会争抢 127.0.0.1:31181
-            - 默认数据面是 Node（与原版一致），Rust 数据面是实验通道（设置里把 proxy.engine 改成 rust）
-          releaseDraft: true
-          prerelease: false
-          args: --target x86_64-pc-windows-msvc
+        working-directory: app
+        run: npm run tauri build -- --target x86_64-pc-windows-msvc
 
       - name: 校验安装包确实生成了
         id: find
@@ -161,13 +149,63 @@ jobs:
           pwsh -File scripts/smoke-installer.ps1 -Installer '${{ steps.find.outputs.path }}'
           if ($LASTEXITCODE -ne 0) { throw '安装冒烟失败' }
 
-      - name: 上传安装包
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-installer
-          if-no-files-found: error
-          retention-days: 14
-          path: |
-            app/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
-            app/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.sig
-            app/src-tauri/target/release/bundle/nsis/*.exe
+      # 直接发正式 release（不要 draft，不要 artifact）：
+      # 安装包、冒烟都过了才走到这里，所以发出去的包一定是能装能跑的。
+      - name: 发布 release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = '${{ github.event.inputs.release_tag || github.ref_name }}'
+          $exe = '${{ steps.find.outputs.path }}'
+          if (-not $tag) { throw '没有 release tag' }
+          if (-not (Test-Path $exe)) { throw "安装包不存在: $exe" }
+
+          @"
+          DevSidecar Lite $tag（Windows x64，NSIS 安装包）
+
+          ### 安装
+          - 双击安装即可，管理器里装好就能直接看到代理开关
+          - 首次开启「系统代理」或「PAC 分流」时会提示安装根证书，必须装，否则 HTTPS 站点会报证书错误
+          - 从 Electron 版迁移请先卸载旧版，两者会争抢 127.0.0.1:31181
+
+          ### 说明
+          - 默认数据面是 Node（与原版一致），Rust 数据面是实验通道（设置里把 proxy.engine 改成 rust）
+          - 日志在 `%ProgramData%\\dev-sidecar-lite\\log\\core-host.log`
+          - 配置目录与原版共用 `C:\\Users\\<你>\\.dev-sidecar`
+          "@ | Set-Content -Path release-notes.md -Encoding utf8
+
+          gh release view $tag --json tagName 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "release $tag 已存在，覆盖安装包与说明"
+            gh release upload $tag $exe --clobber
+            if ($LASTEXITCODE -ne 0) { throw '上传安装包失败' }
+            gh release edit $tag --notes-file release-notes.md --latest --draft=false --prerelease=false
+            if ($LASTEXITCODE -ne 0) { throw '更新 release 说明失败' }
+          } else {
+            Write-Host "创建 release $tag"
+            gh release create $tag $exe `\
+              --title "DevSidecar Lite $tag" `\
+              --notes-file release-notes.md `\
+              --latest `\
+              --target '${{ github.sha }}'
+            if ($LASTEXITCODE -ne 0) { throw '创建 release 失败' }
+          }
+          Write-Host "已发布：https://github.com/${{ github.repository }}/releases/tag/$tag"
+
+      # 万一发布那一步只做了一半（release 建了但安装包没传上去），别把半成品挂在外面
+      - name: 发布失败时回滚 release
+        if: failure()
+        continue-on-error: true
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = '${{ github.event.inputs.release_tag || github.ref_name }}'
+          if (-not $tag) { exit 0 }
+          gh release view $tag --json tagName 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            gh release delete $tag --yes
+            Write-Host "已删除半成品 release $tag"
+          }
