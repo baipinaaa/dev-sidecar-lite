@@ -37,6 +37,40 @@ function takeOverStdout () {
 }
 
 /** 写一帧协议数据（只有它允许写真正的 stdout）。 */
+/**
+ * 让子进程的 stdout/stderr 不再继承本进程的 fd 1。
+ *
+ * core 的 `modules/server/index.js:173` 直接 `fork(mitmproxyPath, [runningConfigPath])`，
+ * Node 的 fork 默认 `silent: false`，于是数据面的日志会顺着继承来的 fd 1 混进协议流
+ * （CI 冒烟里就是这条断言挂的：「stdout 无协议污染」）。
+ *
+ * 这里把 fork 包一层：强制 `silent: true`（子进程的 stdout/stderr 变成管道），
+ * 再把两个管道接到本进程的 stderr。必须在加载 core **之前**调用，
+ * 因为 core 用 `const fork = require('node:child_process').fork` 在模块顶层就取走了函数。
+ */
+function isolateChildStdio () {
+  const cp = require('node:child_process')
+  if (cp.fork.__dsIsolated) {
+    return
+  }
+
+  const original = cp.fork
+  const patched = function fork (modulePath, args, options) {
+    const realArgs = Array.isArray(args) ? args : []
+    const realOptions = (Array.isArray(args) ? options : args) || {}
+    const child = original.call(cp, modulePath, realArgs, { ...realOptions, silent: true })
+    if (child.stdout) {
+      child.stdout.pipe(process.stderr, { end: false })
+    }
+    if (child.stderr) {
+      child.stderr.pipe(process.stderr, { end: false })
+    }
+    return child
+  }
+  patched.__dsIsolated = true
+  cp.fork = patched
+}
+
 function writeFrame (payload) {
   const write = rawStdoutWrite || process.stdout.write.bind(process.stdout)
   write(`${JSON.stringify(payload)}\n`)
@@ -146,8 +180,4 @@ function serve (options) {
   }
 }
 
-module.exports = {
-  serve,
-  takeOverStdout,
-  writeFrame,
-}
+module.exports = { serve, takeOverStdout, isolateChildStdio, writeFrame }

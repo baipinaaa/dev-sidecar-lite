@@ -230,14 +230,16 @@ function resolveBundleRoot (coreDir) {
  * 这里连 console 方法一起换掉，双保险。
  */
 function redirectConsoleToStderr () {
-  const toStderr = (level) => (...args) => {
-    process.stderr.write(`[${level}] ${args.map((item) => (typeof item === 'string' ? item : safeInspect(item))).join(' ')}\n`)
+  const toStderr = (prefix) => (...args) => {
+    const text = args.map((item) => (typeof item === 'string' ? item : safeInspect(item))).join(' ')
+    process.stderr.write(prefix + text + String.fromCharCode(10))
   }
-  console.log = toStderr('core-host')
+  // 调用点普遍自带 `[core-host] ` 前缀，这里不再重复加
+  console.log = toStderr('')
   console.info = console.log
   console.debug = console.log
-  console.warn = toStderr('warn')
-  console.error = toStderr('error')
+  console.warn = toStderr('[warn] ')
+  console.error = toStderr('[error] ')
 }
 
 function safeInspect (value) {
@@ -263,6 +265,8 @@ async function main () {
   // stdio 判断要赶在 parseArgs 与一切日志之前：stdout 从第一帧起就只能是协议数据
   if (process.argv.includes('--stdio')) {
     rpc.takeOverStdout()
+    // 数据面是 fork 出来的子进程，默认继承 fd 1；不做隔离，它的日志会混进协议流
+    rpc.isolateChildStdio()
     redirectConsoleToStderr()
   }
 
