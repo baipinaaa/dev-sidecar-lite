@@ -294,6 +294,25 @@ function main () {
         '--user-dir', process.env.DS_USER_DIR_NAME || '.dev-sidecar-lite',
       ], liteRoot)
       bundled = true
+
+    // 2.7) 用户配置目录：core 里硬编码 `~/.dev-sidecar`，打平后直接在产物里换成 `.dev-sidecar-lite`
+    //      （esbuild 插件那条路在 node_modules 布局下命中不稳定，这里做最终兜底，幂等）
+    if (bundled) {
+      const userDir = process.env.DS_USER_DIR_NAME || '.dev-sidecar-lite'
+      for (const name of ['core.cjs', 'mitmproxy.cjs']) {
+        const file = path.join(opts.out, 'bundle', name)
+        if (!fs.existsSync(file)) {
+          continue
+        }
+        const src = fs.readFileSync(file, 'utf8')
+        const re = /\.dev-sidecar(?![-.\w])/g
+        const hits = (src.match(re) || []).length
+        if (hits > 0) {
+          fs.writeFileSync(file, src.replace(re, userDir))
+        }
+        console.log(`[core-bundle] ${name} 用户配置目录替换 ${hits} 处 -> ${userDir}`)
+      }
+    }
     }
 
     // 3) 组包
