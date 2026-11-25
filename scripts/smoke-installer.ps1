@@ -221,12 +221,13 @@ try {
         $detail = "缺少控制面入口：$entryJs"
         throw $detail
     }
-    if (-not (Test-Path (Join-Path $corePkg 'package.json'))) {
+    # 打平后 $corePkg / $mitmproxyPkg 是文件（bundle/*.cjs），不是包目录
+    if (-not (Test-Path $corePkg)) {
         $detail = "缺少 core 打平产物：$corePkg（打包步骤没跑 prepare-core-bundle 或打平失败）"
         throw $detail
     }
-    if (-not (Test-Path (Join-Path $mitmproxyPkg 'package.json'))) {
-        $detail = "缺少 mitmproxy：$mitmproxyPkg"
+    if (-not (Test-Path $mitmproxyPkg)) {
+        $detail = "缺少数据面打平产物：$mitmproxyPkg"
         throw $detail
     }
     if (-not (Test-Path (Join-Path $extraDir 'sysproxy.exe'))) {
