@@ -147,7 +147,8 @@ function installUserDir (dirName = process.env.DS_USER_DIR_NAME || '.dev-sidecar
   const pattern = /\.dev-sidecar(?![-.\w])/g
   // 两种布局都要盖到：磁盘依赖树（`@blue-frontier/...`）与打平产物（`bundle/core.cjs`）。
   // 打平后 core 的全部源码在同一个文件里，一次替换就覆盖所有 `~/.dev-sidecar` 字面量。
-  const inBundle = /@blue-frontier[\/](?:dev-sidecar|mitmproxy)[\/]|[\/]bundle[\/](?:core|mitmproxy)\.cjs$/
+  const inBundle = /@blue-frontier[\/](?:dev-sidecar|mitmproxy)[\/]|[\/]bundle[\/](?:core|mitmproxy)\.cjs$/i
+  const jsExt = Module._extensions['.js']
 
   Module.prototype._compile = function (content, filename, ...rest) {
     if (typeof content === 'string' && filename && inBundle.test(filename)) {
@@ -164,6 +165,24 @@ function installUserDir (dirName = process.env.DS_USER_DIR_NAME || '.dev-sidecar
       }
     }
     return originalCompile.call(this, content, filename, ...rest)
+  }
+
+  // 双保险：Node 内部 CJS loader 走 `Module._extensions['.js']`，
+  // 直接包装它比只 patch `_compile` 更可靠（后者在部分版本上观察不到调用）。
+  Module._extensions['.js'] = function (module, filename) {
+    if (filename && inBundle.test(filename)) {
+      let hits = 0
+      const src = require('node:fs').readFileSync(filename, 'utf8').replace(pattern, () => {
+        hits++
+        return dirName
+      })
+      userDirHits += hits
+      if (process.env.DS_CORE_DEBUG) {
+        console.log(`[core-host] _extensions 命中 ${hits} 处: ${filename}`)
+      }
+      return originalCompile.call(module, src, filename)
+    }
+    return jsExt.call(this, module, filename)
   }
 
   userDirInstalled = true
