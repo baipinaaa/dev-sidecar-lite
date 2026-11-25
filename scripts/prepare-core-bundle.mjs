@@ -413,7 +413,11 @@ function main () {
           `if (intercepts < 100) throw new Error('intercepts 数量异常: ' + intercepts)`,
           `if (!core.serviceGroup || typeof core.serviceGroup.listCatalog !== 'function') throw new Error('serviceGroup 缺失')`,
           `if (typeof core.lodash.get !== 'function') throw new Error('lodash 缺失')`,
-          `const bridge = require(path.join(process.cwd(), 'bundle', 'mitmproxy.cjs'))`,
+          // 注意：bundle/mitmproxy.cjs 是「可执行入口」（读 argv[2] 启动数据面），
+          // require 它会直接 exit(1)，这里只断言文件存在且非空
+          `const fs = require('node:fs')`,
+          `const bridge = path.join(process.cwd(), 'bundle', 'mitmproxy.cjs')`,
+          `if (!fs.existsSync(bridge) || fs.statSync(bridge).size < 64 * 1024) throw new Error('mitmproxy.cjs 缺失或过小: ' + bridge)`,
           `console.log('[core-bundle] 打平自检通过, intercepts=' + intercepts)`,
         ].join(';')
       : [
