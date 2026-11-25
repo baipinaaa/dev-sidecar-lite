@@ -117,6 +117,7 @@ function findInResources (...segments) {
 }
 
 let userDirInstalled = false
+let userDirHits = 0
 
 /**
  * 把 core 的用户目录从 `~/.dev-sidecar` 换成 `~/.dev-sidecar-lite`。
@@ -150,7 +151,17 @@ function installUserDir (dirName = process.env.DS_USER_DIR_NAME || '.dev-sidecar
 
   Module.prototype._compile = function (content, filename, ...rest) {
     if (typeof content === 'string' && filename && inBundle.test(filename)) {
-      content = content.replace(pattern, dirName)
+      let hits = 0
+      content = content.replace(pattern, () => {
+        hits++
+        return dirName
+      })
+      if (hits > 0) {
+        userDirHits += hits
+      }
+      if (hits === 0 && process.env.DS_CORE_DEBUG) {
+        console.log(`[core-host] 用户目录未替换（无字面量）: ${filename}`)
+      }
     }
     return originalCompile.call(this, content, filename, ...rest)
   }
@@ -162,6 +173,7 @@ function installUserDir (dirName = process.env.DS_USER_DIR_NAME || '.dev-sidecar
 module.exports = {
   installPackageAliases,
   installUserDir,
+  userDirStats: () => ({ hits: userDirHits, installed: userDirInstalled }),
   requireFrom,
   installRoots,
   findInResources,

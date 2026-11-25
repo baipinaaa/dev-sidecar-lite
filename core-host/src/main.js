@@ -123,12 +123,18 @@ function resolveCore () {
   ].filter(Boolean)
   for (const file of bundledCandidates) {
     if (!fs.existsSync(file)) {
+      if (process.env.DS_CORE_DEBUG) {
+        console.log(`[core-host] 打平产物不存在: ${file}`)
+      }
       continue
     }
     try {
       const bundleModule = require(file)
       if (bundleModule && bundleModule.api) {
         return { core: { api: bundleModule.api }, from: file, bundleModule }
+      }
+      if (process.env.DS_CORE_DEBUG) {
+        console.log(`[core-host] 打平产物缺少 api 导出: ${file}`)
       }
     } catch (err) {
       console.error(`[core-host] 加载打平产物失败: ${file} → ${err && err.message ? err.message : err}`)
@@ -243,12 +249,14 @@ function resolveBundleRoot (coreDir) {
     // 安装布局：exe 在 $INSTDIR，bundle 在 $INSTDIR/core-bundle
     path.join(path.dirname(process.execPath), 'core-bundle'),
     path.join(path.dirname(process.execPath), 'resources', 'core-bundle'),
-    // 已经有 core 的绝对路径时，直接反推最可靠（不依赖 execPath / __dirname 在 SEA 下的语义）
+    // node 在 <bundle>/node 下时，execPath 反推要多上一层
+    path.resolve(path.dirname(process.execPath), '..'),
+    // 已经有 core 的绝对路径时，直接反推最可靠（不依赖 execPath / __dirname 的语义）
     bundleRootFromCore(coreDir),
     ...runtime.findInResources('core-bundle', 'core-host', 'mitmproxy-bridge.cjs').map((hit) =>
       path.resolve(path.dirname(hit), '..', '..')),
     path.resolve(__dirname, '..', '..'),
-  ]
+  ].filter(Boolean)
   for (const candidate of candidates) {
     if (fs.existsSync(path.join(candidate, 'node_modules')) || fs.existsSync(path.join(candidate, 'extra'))) {
       return candidate
@@ -314,6 +322,14 @@ async function main () {
   console.log(`[core-host] 用户配置目录: ${path.join(process.env.USERPROFILE || process.env.HOME || '/', userDirName)}`)
 
   const { core, from, bundleModule } = resolveCore()
+  console.log(`[core-host] core 来源: ${from}`)
+  try {
+    const cfg = core.api.config.get()
+    console.log(`[core-host] setting.userBasePath: ${cfg && cfg.setting && cfg.setting.userBasePath}`)
+  } catch (e) {
+    console.log(`[core-host] 读取 userBasePath 失败: ${e && e.message}`)
+  }
+  console.log(`[core-host] 用户目录替换次数: ${require('./runtime').userDirStats().hits}`)
   const nodeEntry = resolveMitmproxyPath()
   const bundleRoot = resolveBundleRoot(from)
 
