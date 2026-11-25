@@ -36,10 +36,11 @@
 ```
 dev-sidecar-lite.exe       Tauri 2 外壳（WebView2 + 原版 Vue 页面）
   └─ node.exe              core-bundle/node/node.exe，跑 core-bundle/core-host/main.js
-       ├─ core-bundle/node_modules/@blue-frontier/dev-sidecar    控制面（配置/插件/规则/PAC/证书）
-       ├─ core-bundle/node_modules/@blue-frontier/mitmproxy      数据面（fork 出子进程）
+       ├─ core-bundle/bundle/core.cjs                             控制面（esbuild 打平：配置/插件/规则/PAC/证书）
+       ├─ core-bundle/bundle/mitmproxy.cjs                        数据面（fork 出子进程，同样已打平）
+       ├─ core-bundle/bundle/res/packages/**                      上面两份运行时读的 json/pac/脚本模板
        ├─ core-bundle/extra/                                      sysproxy.exe、证书脚本、PAC
-       └─ core-bundle/core-host/mitmproxy-bridge.cjs              fork 目标（注入 rootDir）
+       └─ core-bundle/core-host/                                  控制面宿主（main.js + bridge-runner.js）
 ```
 
 界面 → 控制面宿主（`core-host`）→ `core.api` 这条链路和原版一致，所以插件、`config.json` 语义、

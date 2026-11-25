@@ -12,8 +12,13 @@
  *   loggerFactory, serviceGroup, coreConfig, securityMigrate, redactLogs }`。
  */
 
+// 注意：包主入口导出的是 `{ status, api }`（`packages/core/src/expose.js:194`），
+// 宿主用的是里面的 `api`，不是整个导出对象。
+const devSidecar = require('@blue-frontier/dev-sidecar')
+
 module.exports = {
-  api: require('@blue-frontier/dev-sidecar'),
+  api: devSidecar.api,
+  status: devSidecar.status,
   lodash: require('lodash'),
   json: require('@blue-frontier/mitmproxy/src/json.js'),
   localConfigLoader: require('@blue-frontier/dev-sidecar/src/config/local-config-loader.js'),

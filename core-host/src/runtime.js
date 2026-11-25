@@ -144,7 +144,9 @@ function installUserDir (dirName = process.env.DS_USER_DIR_NAME || '.dev-sidecar
   // `'.dev-sidecar/proxy.env'` 三种写法都要盖到，所以直接匹配那一段字面量；
   // `(?![-.\w])` 保证幂等（已经是 `.dev-sidecar-lite` 的不会再被改）。
   const pattern = /\.dev-sidecar(?![-.\w])/g
-  const inBundle = /@blue-frontier[\\/](?:dev-sidecar|mitmproxy)[\\/]/
+  // 两种布局都要盖到：磁盘依赖树（`@blue-frontier/...`）与打平产物（`bundle/core.cjs`）。
+  // 打平后 core 的全部源码在同一个文件里，一次替换就覆盖所有 `~/.dev-sidecar` 字面量。
+  const inBundle = /@blue-frontier[\/](?:dev-sidecar|mitmproxy)[\/]|[\/]bundle[\/](?:core|mitmproxy)\.cjs$/
 
   Module.prototype._compile = function (content, filename, ...rest) {
     if (typeof content === 'string' && filename && inBundle.test(filename)) {

@@ -102,7 +102,8 @@ core.api.server.start({ mitmproxyPath, setting })
 | 用户配置 | `C:\Users\<你>\.dev-sidecar-lite\config.json`（`config.json5` 兼容） |
 | 根证书 | 同目录 `dev-sidecar.ca.crt` / `dev-sidecar.ca.key` |
 | 日志 | 同目录 `log\`；控制面自身日志在 `%ProgramData%\dev-sidecar-lite\log\core-host.log` |
-| 运行时 | `%ProgramData%\dev-sidecar-liteunning.json`（`run/core.token` 只在 HTTP 调试模式生成） |
+| 运行时 | `%ProgramData%\dev-sidecar-lite
+unning.json`（`run/core.token` 只在 HTTP 调试模式生成） |
 
 core 内部把 `~/.dev-sidecar` 写死在十几个位置，本项目不改上游代码，而是在加载时对
 `@blue-frontier/**` 的源码做一次字面量替换（`core-host/src/runtime.js` 的 `installUserDir()`），
@@ -112,12 +113,16 @@ core 内部把 `~/.dev-sidecar` 写死在十几个位置，本项目不改上游
 
 | 层 | 内容 | 说明 |
 | --- | --- | --- |
-| L1 单文件 | 控制面 `bundle.cjs` | esbuild 打成单文件，只有这份是「代码」 |
-| L2 打平 | `core-bundle/node_modules` | 用 pnpm `node-linker=hoisted` 产真实文件树（不能用符号链接，NSIS 会丢） |
-| L3 保留 | `core-bundle/extra`、`*.node` 原生模块 | 原生模块不能打平，`extra` 里有 exe 与脚本 |
+| L1 运行时 | `core-bundle/node/node.exe` | 随包的 Node 运行时（98.6 MB），不起 SEA、不需要 postject |
+| L2 打平 | `core-bundle/bundle/{core,mitmproxy}.cjs` | `scripts/build-bundles.mjs` 用 esbuild 把两个包各自打成一个 cjs；`__dirname` 由插件改写成 `bundle/res/packages/<包>/<相对路径>`，非 js 资源按原相对路径镜像过去 |
+| L3 保留 | `core-bundle/extra/`、`node_modules/{koffi,@starknt/sysproxy,wreq-js,keytar}` | 原生/可选二进制不能打平（`EXTERNALS`），`extra` 里有 exe 与脚本 |
 
-`core-bundle` 体积门禁 70 MB（当前 33 MB），文件数以「尽力而为」为目标（当前 3.6k，
-原版 Electron 版靠 asar 压到 133 个文件）。
+打平之后 `node_modules` 里只剩上面四个包，`core-bundle` 的文件数从 3600+ 降到几十；
+`core-host` 本身不打平（只有几个 js，且需要磁盘路径给 `fork` 用）。
+体积门禁 140 MB（node 运行时占绝大部分），文件数以「尽力而为」为目标
+（用户已明确不设硬门禁，原版 Electron 版靠 asar 压到 133 个文件）。
+
+回退开关：`node scripts/prepare-core-bundle.mjs --no-bundle` 可以退回「整棵 node_modules」布局。
 
 ## 七、已知边界
 
