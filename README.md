@@ -35,14 +35,14 @@
 
 ```
 dev-sidecar-lite.exe       Tauri 2 外壳（WebView2 + 原版 Vue 页面）
-  └─ ds-core-host.exe      Node：加载 core-bundle，对外提供控制面
+  └─ node.exe              core-bundle/node/node.exe，跑 core-bundle/core-host/main.js
        ├─ core-bundle/node_modules/@blue-frontier/dev-sidecar    控制面（配置/插件/规则/PAC/证书）
        ├─ core-bundle/node_modules/@blue-frontier/mitmproxy      数据面（fork 出子进程）
        ├─ core-bundle/extra/                                      sysproxy.exe、证书脚本、PAC
        └─ core-bundle/core-host/mitmproxy-bridge.cjs              fork 目标（注入 rootDir）
 ```
 
-界面 → `ds-core-host` → `core.api` 这条链路和原版一致，所以插件、`config.json` 语义、
+界面 → 控制面宿主（`core-host`）→ `core.api` 这条链路和原版一致，所以插件、`config.json` 语义、
 `intercepts` / `dns.mapping` / `preSetIpList` 等规则全部照旧生效。
 
 ### 与 Electron 版的差异
@@ -50,7 +50,7 @@ dev-sidecar-lite.exe       Tauri 2 外壳（WebView2 + 原版 Vue 页面）
 | | Electron 版 | 本版 |
 | --- | --- | --- |
 | 外壳 | Electron 42（Chromium + Node 双份运行时） | Tauri 2（系统 WebView2） |
-| 控制面 | Electron 主进程内 | `ds-core-host.exe` 独立进程 |
+| 控制面 | Electron 主进程内 | 独立进程（随包的 `node.exe` + `core-host/main.js`） |
 | 界面通信 | `ipcRenderer.invoke('apiInvoke')` | 进程间 RPC（stdio / HTTP，见 `docs/ARCHITECTURE.md`） |
 | 状态推送 | `ipcRenderer.on('status'/'speed'/...)` | 事件流（`core-event` 再按 `channel` 分发） |
 | 系统能力 | `electron.shell` / `electron-dialog` | `tauri-plugin-opener` / `tauri-plugin-dialog` |
@@ -71,9 +71,8 @@ cd app; npm install; npm run tauri:dev
 # 组装 core-bundle（CI 里同一条命令）
 node scripts/prepare-core-bundle.mjs --dev-sidecar ..\dev-sidecar --max-mb 70
 
-# 控制面单文件（CI 里同一条命令）
-node core-host/scripts/build-sea.js
-pwsh -File scripts/prepare-binaries.ps1 -Strict
+# 装机形态的冒烟（CI 里同一条命令）
+pwsh -File scripts/smoke-core-host.ps1
 ```
 
 ## 已知限制
@@ -87,7 +86,7 @@ pwsh -File scripts/prepare-binaries.ps1 -Strict
 
 - **不做锁区/年龄门绕过**：作者服务器中转那套方案不在本项目范围内
 - **不内建远程脚本注入**：所有规则来自本地 `config.json`
-- **只监听回环**：`ds-core-host` 与数据面都绑 `127.0.0.1`
+- **只监听回环**：控制面与数据面都绑 `127.0.0.1`
 - **单一数据面**：只有 Node 数据面；不再保留半成品 Rust 数据面
 
 ## 致谢

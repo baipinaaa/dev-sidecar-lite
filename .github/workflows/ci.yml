@@ -17,7 +17,7 @@ on:
   workflow_dispatch:
 
 env:
-  CORE_BUNDLE_MAX_MB: '70'
+  CORE_BUNDLE_MAX_MB: '140'
 
 concurrency:
   group: ci-${{ github.ref }}

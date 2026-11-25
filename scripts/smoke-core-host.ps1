@@ -1,21 +1,15 @@
 #!/usr/bin/env pwsh
 <#
 .SYNOPSIS
-    冒烟测试 `ds-core-host`：按「安装目录形态」起 exe，验证控制面 + 数据面都通。
+    冒烟测试控制面：用 `node core-host/src/main.js` 起，验证控制面 + 数据面都通。
 
 .DESCRIPTION
-    为什么需要这个脚本：`ds-core-host` 是 Node SEA，只把入口打进 exe，
-    core（`@blue-frontier/dev-sidecar`）与 mitmproxy 都是运行时才 `require` 的。
-    如果打包时忘了放 core-bundle，安装包能装上、exe 也能启动，但一进去就 MODULE_NOT_FOUND。
+    为什么需要这个脚本：core（`@blue-frontier/dev-sidecar`）与 mitmproxy 都是运行时才
+    `require` 的，如果打包时忘了放 core-bundle，安装包能装上、进程也能启动，
+    但一进去就 MODULE_NOT_FOUND。
 
-    这里模拟真实安装目录（tauri 的 `bundle.resources` 会原样放到安装根目录）：
-
-        <work>/ds-core-host.exe
-        <work>/core-bundle/node_modules/@blue-frontier/dev-sidecar/...
-        <work>/core-bundle/node_modules/@blue-frontier/mitmproxy/...
-        <work>/core-bundle/extra/sysproxy.exe ...
-
-    不设 `DS_CORE_PATH` / `DS_EXTRA_PATH`，完全靠 exe 自己按安装布局解析。
+    这里用仓库里组装好的 core-bundle（默认 `app/src-tauri/core-bundle`），
+    通过 `DS_CORE_BUNDLE` 指给 main.js，不设 `DS_CORE_PATH` / `DS_EXTRA_PATH`。
 
     断言链（缺一不可）：
       1. `/healthz` 起来
@@ -27,11 +21,10 @@
 
 .EXAMPLE
     pwsh -File scripts/smoke-core-host.ps1
-    pwsh -File scripts/smoke-core-host.ps1 -Exe core-host/dist/ds-core-host.exe -Port 31199
+    pwsh -File scripts/smoke-core-host.ps1 -Port 31199 -ProxyPort 31198
 #>
 param(
-    [string]$Exe = 'core-host/dist/ds-core-host.exe',
-    [string]$NodeEntry = '',
+    [string]$NodeEntry = 'core-host/src/main.js',
     [string]$CoreBundle = 'app/src-tauri/core-bundle',
     [int]$Port = 31199,
     [int]$ProxyPort = 31198,
@@ -56,21 +49,11 @@ function Resolve-Path2 {
     return (Join-Path $root $Path)
 }
 
-# -NodeEntry 用于「没编 SEA 时先验逻辑」：直接 node core-host/src/main.js，断言链完全一样
 $bundlePath = Resolve-Path2 $CoreBundle
-$useNode = $NodeEntry -ne ''
-if ($useNode) {
-    $entryPath = Resolve-Path2 $NodeEntry
-    if (-not (Test-Path $entryPath)) {
-        Write-Host "[FAIL] 找不到 Node 入口：$entryPath" -ForegroundColor Red
-        exit 1
-    }
-} else {
-    $exePath = Resolve-Path2 $Exe
-    if (-not (Test-Path $exePath)) {
-        Write-Host "[FAIL] 找不到 ds-core-host.exe：$exePath（先跑 node core-host/scripts/build-sea.js，或用 -NodeEntry core-host/src/main.js）" -ForegroundColor Red
-        exit 1
-    }
+$entryPath = Resolve-Path2 $NodeEntry
+if (-not (Test-Path $entryPath)) {
+    Write-Host "[FAIL] 找不到 Node 入口：$entryPath" -ForegroundColor Red
+    exit 1
 }
 
 $coreDir = Join-Path $bundlePath 'node_modules/@blue-frontier/dev-sidecar'
@@ -107,16 +90,8 @@ $configFile = Join-Path $homeDir '.dev-sidecar-lite/config.json'
     app               = @{ autoStart = @{ enabled = $false } }
 } | ConvertTo-Json -Depth 6 | Set-Content -Path $configFile -Encoding utf8NoBOM
 
-if ($useNode) {
-    # node 模式：入口就在仓库里，直接把 core-bundle 摆到 repo 的 app/src-tauri/core-bundle 位置以外
-    # 用 DS_CORE_BUNDLE 让 main.js 认这个临时 bundle（安装形态才靠 exe 相对路径自动发现）
-    $env:DS_CORE_BUNDLE = $bundlePath
-} else {
-    Copy-Item $exePath (Join-Path $work 'ds-core-host.exe') -Force
-    $destBundle = Join-Path $work 'core-bundle'
-    New-Item -ItemType Directory -Force -Path $destBundle | Out-Null
-    Copy-Item (Join-Path $bundlePath '*') $destBundle -Recurse -Force
-}
+# 入口在仓库里，core-bundle 也用仓库里组装好的那份（安装形态才靠相对路径自动发现）
+$env:DS_CORE_BUNDLE = $bundlePath
 
 Write-Host "工作目录: $work"
 
@@ -127,18 +102,15 @@ $env:USERPROFILE = $homeDir
 $env:HOME = $homeDir
 $env:DS_DATA_DIR = $dataDir
 
-if ($useNode) {
+# 优先用 core-bundle 里随包的 node 运行时（与安装形态一致），没有就用 PATH 里的 node
+$nodeExe = Join-Path $bundlePath 'node/node.exe'
+if (-not (Test-Path $nodeExe)) {
     $nodeExe = (Get-Command node -ErrorAction Stop).Source
-    $proc = Start-Process -FilePath $nodeExe `
-        -ArgumentList $entryPath, '--port', $Port, '--no-startup' `
-        -RedirectStandardOutput $stdout -RedirectStandardError $stderr `
-        -PassThru -WindowStyle Hidden
-} else {
-    $proc = Start-Process -FilePath (Join-Path $work 'ds-core-host.exe') `
-    -ArgumentList '--port', $Port, '--no-startup' `
+}
+$proc = Start-Process -FilePath $nodeExe `
+    -ArgumentList $entryPath, '--port', $Port, '--no-startup' `
     -RedirectStandardOutput $stdout -RedirectStandardError $stderr `
     -PassThru -WindowStyle Hidden
-}
 
 $ok = $false
 $detail = ''
@@ -230,7 +202,7 @@ try {
         Start-Sleep -Milliseconds 300
     }
     # 数据面子进程是 fork 出来的，杀掉父进程不一定会带走它
-    Get-CimInstance Win32_Process -Filter "Name='ds-core-host.exe' OR Name='node.exe'" -ErrorAction SilentlyContinue |
+    Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
         Where-Object { $_.CommandLine -like "*$work*" } |
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 }

@@ -2,8 +2,8 @@
 /**
  * 组装 core-bundle/ —— Tauri 安装包里那个「Node 控制面 + Node 数据面」的运行时目录。
  *
- * 为什么需要它：ds-core-host（SEA 单文件）只打包了入口脚本，core 与 mitmproxy 是
- * 运行时才 require 的，必须随安装包以真实文件形式存在（SEA 里没有 node_modules）。
+ * 为什么需要它：core 与 mitmproxy 是运行时才 require 的，必须随安装包以真实文件形式存在；
+ * 控制面用随包的 `node.exe`（`core-bundle/node/node.exe`）跑磁盘上的 js，不再打 SEA 单文件。
  *
  * 为什么不直接 `pnpm deploy`：core 与 mitmproxy 互相依赖（`@blue-frontier/*`），
  * 单独 deploy 任一个都拿不到另一个；而 `pnpm deploy` 的目标树里还是符号链接，
@@ -12,7 +12,7 @@
  *
  * 用法：
  *   node scripts/prepare-core-bundle.mjs [--dev-sidecar <path>] [--out <path>]
- *                                        [--max-mb 70] [--keep]
+ *                                        [--max-mb 140] [--keep]
  */
 
 import fs from 'node:fs'
@@ -340,10 +340,19 @@ function main () {
       path.join(opts.out, 'core-host', 'package.json'),
     )
 
+    // 6) Node 运行时：控制面用随包的 node.exe 跑（不再 postject 成 SEA 单文件）
+    const nodeDir = path.join(opts.out, 'node')
+    fs.mkdirSync(nodeDir, { recursive: true })
+    const nodeExe = path.join(nodeDir, 'node.exe')
+    fs.copyFileSync(process.execPath, nodeExe)
+    fs.writeFileSync(path.join(nodeDir, 'VERSION'), `${process.version}\n`)
+    const nodeMb = (fs.statSync(nodeExe).size / (1024 * 1024)).toFixed(1)
+    console.log(`[core-bundle] node 运行时 -> node/node.exe（${process.version}，${nodeMb} MB）`)
+
     const version = fs.existsSync(litePkgPath) ? readJson(litePkgPath).version : '0.0.0'
     fs.writeFileSync(path.join(opts.out, 'VERSION'), `${version}\n`)
 
-    // 6) 体积门禁
+    // 7) 体积门禁
     const bytes = dirSize(opts.out)
     const mb = bytes / 1048576
     console.log(`[core-bundle] 体积: ${mb.toFixed(1)} MB（门禁 ${opts.maxMb} MB）`)
@@ -351,7 +360,7 @@ function main () {
       throw new Error(`core-bundle 超过体积门禁：${mb.toFixed(1)} MB > ${opts.maxMb} MB`)
     }
 
-    // 7) 自检：能不能真的 require 起来（用 @blue-frontier/ 名字，跟运行时一致）
+    // 8) 自检：能不能真的 require 起来（用 @blue-frontier/ 名字，跟运行时一致）
     const probe = [
       `const core = require('@blue-frontier/dev-sidecar')`,
       `if (!core.api) throw new Error('core.api 缺失')`,

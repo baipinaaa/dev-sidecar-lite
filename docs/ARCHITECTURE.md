@@ -13,7 +13,7 @@
 └───────────────────────┬──────────────────────────────────┘
                         │ 进程间 RPC（api 名与 $api.* 一致）
 ┌───────────────────────▼──────────────────────────────────┐
-│ ds-core-host.exe      Node 控制面宿主                      │
+│ node.exe + bundle     Node 控制面宿主（core-bundle/core-host/main.js）│
 │  ├─ core.api         @blue-frontier/dev-sidecar（配置/插件/  │
 │  │                    规则/PAC/证书/系统代理）              │
 │  └─ localApi         补充 core 没有的 24 个接口             │
@@ -30,7 +30,7 @@
 | 进程 | 生命周期 | 崩溃影响 |
 | --- | --- | --- |
 | Tauri 壳 | 用户可见 | 界面消失，代理继续跑（数据面归 core-host 管） |
-| `ds-core-host.exe` | 壳启动时拉起，壳退出时 taskkill /T | 代理停摆，界面报错横幅 |
+| `node.exe core-host/main.js` | 壳启动时拉起，壳退出时 taskkill /T | 代理停摆，界面报错横幅 |
 | 数据面（Node） | `server.start` 时 fork，`server.close` 时 IPC 退出 | 代理停摆，core 的 `status` 变红 |
 
 ## 二、为什么控制面要独立成进程
@@ -44,13 +44,14 @@
 
 1. **控制面必须在监听前把 token 写到磁盘**，否则壳的第一次调用会 401（0.2.0 的「点按钮没反应」就是这么来的：
    `CoreClient` 在应用启动瞬间读 token，那时 core-host 还没起来）。
-2. **`fork` 的脚本入口必须是 Node 能直接执行的 `.cjs`/`.js`**。若控制面被打成单文件 exe（SEA），
-   `fork()` 默认复用 `process.execPath`，会「再跑一遍自己」，必须改写成显式 `spawn + --mitmproxy-bridge`（见 `core-host/src/fork-shim.js`）。
-3. **`require('@blue-frontier/*')` 必须能落到磁盘上的包目录**。SEA 的 `require` 只认内置模块，
-   于是 core-host 里所有第三方依赖都得走 `packageRequire()`（`module.createRequire(<core>/package.json)`）。
+2. **`fork` 的脚本入口必须是 Node 能直接执行的 `.cjs`/`.js`**（`core-bundle/core-host/mitmproxy-bridge.cjs`）。
+3. **`require('@blue-frontier/*')` 必须能落到磁盘上的包目录**：core-host 用
+   `packageRequire()`（`module.createRequire(<core>/package.json)`）解析第三方包，
+   `runtime.installPackageAliases()` 负责把 `@blue-frontier/*` 映射到 core-bundle 下的两个并列目录。
 
-第 2、3 条都是 SEA 带来的，所以 0.3.0 会把控制面从 SEA 改成「普通 node + 单文件 `bundle.cjs`」，
-届时 `fork-shim.js` 与 `packageRequire()` 都可以删掉（见 `plans/v030-arch.md` 的 S1）。
+第 2、3 条都是 SEA 带来的历史包袱。v0.3.0 起控制面改成「随包的 `node.exe` + 磁盘上的 js」，
+`fork()` 与 `require()` 恢复原生语义，`fork-shim.js` 已删除（`packageRequire()` 保留，
+因为安装包里 `@blue-frontier/*` 仍是并列目录）。
 
 ## 三、控制面协议
 

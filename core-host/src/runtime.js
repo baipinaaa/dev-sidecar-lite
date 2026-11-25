@@ -1,73 +1,31 @@
 'use strict'
 
 /**
- * 运行时适配层：让同一份源码既能用 `node src/main.js` 跑，也能被 esbuild 打包成单文件后
- * 用 Node SEA 跑。
+ * 运行时适配层。
  *
- * 为什么需要它：SEA 里入口脚本是"虚拟"的，`__dirname` / `__filename` 不可靠，而且
- * 入口里**普通的 `require()` 只支持内置模块**（实测报
- * `ERR_UNKNOWN_BUILTIN_MODULE: No such built-in module: ./host`）。
- * 所以：
- *   - 源码之间的静态 require 交给 esbuild 内联（它自己处理）；
- *   - 运行期按路径加载磁盘模块（core）必须走 `createRequire(process.execPath)`。
+ * 用途只有两个：
+ *   1. 「安装目录 → 资源目录」的解析（三个地方要用同一套规则：node 运行时、core、mitmproxy）；
+ *   2. 把 `@blue-frontier/*` 解析到磁盘上的真实目录（安装包里它们是并列目录，不走 npm 布局）。
  *
- * 另一个用途是「安装目录 → 资源目录」的解析，三个地方要用同一套规则
- * （core、mitmproxy、core-bundle），集中在这里避免各写一份又对不上。
+ * 历史：v0.2.x 控制面是 Node SEA 单文件，那时还需要 `isSea()` / `createRequire(execPath)`
+ * 之类的适配；v0.3.0 起控制面用普通 `node.exe` 跑磁盘上的源码，这些分支都已删除。
  */
 
 const fs = require('node:fs')
 const path = require('node:path')
-const nodeModule = require('node:module')
-
-/**
- * 是否跑在 SEA 里。
- *
- * `require('node:sea').isSea()` 只有 Node 21+ 才有，这里用更通用的判断：
- * SEA 的入口是内嵌的，`process.execPath` 指向 exe，而 `__filename` 不等于 execPath。
- */
-function isSea () {
-  try {
-    const sea = nodeModule && typeof nodeModule.isSea === 'function' ? nodeModule.isSea() : false
-    if (sea) {
-      return true
-    }
-  } catch (e) {
-    // 忽略
-  }
-  // 退路：打包后入口被内联，__filename 会指向 exe 自身或空
-  try {
-    return !__filename || path.resolve(__filename) === path.resolve(process.execPath)
-  } catch (e) {
-    return true
-  }
-}
-
-let cachedRequire = null
-
-/** 解析磁盘模块用的 require（SEA 下必须从 exe 位置创建）。 */
-function diskRequire () {
-  if (cachedRequire) {
-    return cachedRequire
-  }
-  if (isSea()) {
-    cachedRequire = nodeModule.createRequire(process.execPath)
-    return cachedRequire
-  }
-  cachedRequire = require
-  return cachedRequire
-}
 
 /** 加载一个模块：`target` 可以是包名、绝对路径、或含 package.json 的目录。 */
 function requireFrom (target) {
-  return diskRequire()(target)
+  return require(target)
 }
 
 /**
- * 安装目录候选（Tauri 打包后 sidecar 与 `resources/` 平级）：
+ * 安装目录候选（Tauri 的 `bundle.resources` 会把 core-bundle 放到安装根目录）：
  *
  *     $INSTDIR/dev-sidecar-lite.exe
- *     $INSTDIR/ds-core-host.exe
- *     $INSTDIR/resources/core-bundle/...
+ *     $INSTDIR/core-bundle/node/node.exe
+ *     $INSTDIR/core-bundle/node_modules/@blue-frontier/...
+ *     $INSTDIR/resources/core-bundle/...（部分 Tauri 版本会放到 resources 下）
  */
 function installRoots () {
   const roots = []
@@ -83,14 +41,10 @@ function installRoots () {
   } catch (e) {
     // 忽略
   }
-  try {
-    if (typeof __dirname === 'string' && __dirname) {
-      add(__dirname)
-      add(path.resolve(__dirname, '..'))
-      add(path.resolve(__dirname, '../..'))
-    }
-  } catch (e) {
-    // SEA 下取 __dirname 可能抛错
+  if (typeof __dirname === 'string' && __dirname) {
+    add(__dirname)
+    add(path.resolve(__dirname, '..'))
+    add(path.resolve(__dirname, '../..'))
   }
 
   // 源码开发布局：core-host/src → 仓库根
@@ -110,7 +64,7 @@ function installRoots () {
  *
  * 为什么需要：core 与 mitmproxy 互相 require（core 要 `@blue-frontier/mitmproxy/src/json`，
  * mitmproxy 要 `@blue-frontier/dev-sidecar/src/merge`），而安装包里它们是两个并列目录，
- * 没有走 npm 的 node_modules 布局。SEA 不能建符号链接（也没权限），所以在模块解析层做映射。
+ * 没有走 npm 的 node_modules 布局，所以在模块解析层做映射。
  *
  * @param {{ mitmproxy?: string, core?: string }} dirs
  */
@@ -206,7 +160,6 @@ function installUserDir (dirName = process.env.DS_USER_DIR_NAME || '.dev-sidecar
 module.exports = {
   installPackageAliases,
   installUserDir,
-  isSea,
   requireFrom,
   installRoots,
   findInResources,

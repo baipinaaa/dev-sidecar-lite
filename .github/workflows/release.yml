@@ -3,8 +3,8 @@ name: release
 # 打 tag 时构建并发布 Windows 安装包（NSIS）。
 #
 # 安装包里必须同时有三个东西，少一个装完就是空壳：
-#   1. ds-core-host.exe     Node SEA 打包的控制面宿主（数据面 mitmproxy 由它 fork）
-#   2. core-bundle/         Node core + mitmproxy + extra（运行时才 require，SEA 打不进去）
+#   1. core-bundle/node/    随包的 node 运行时（控制面用它跑磁盘上的 js）
+#   2. core-bundle/         core + mitmproxy + extra + core-host（数据面 mitmproxy 由 core-host fork）
 #   3. app/web 前端产物     由 tauri-action 内构建
 #
 # 这里刻意把「组装 core-bundle」和「构建 exe」放在**同一个 step** 里：
@@ -44,7 +44,7 @@ env:
   RUST_BACKTRACE: 1
   # core-bundle 体积门禁（MB）。超过就往里塞了不该进包的东西，
   # 与其发个 100MB 的包，不如在 CI 红。
-  CORE_BUNDLE_MAX_MB: '70'
+  CORE_BUNDLE_MAX_MB: '140'
 
 jobs:
   build:
@@ -68,7 +68,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
 
-          Write-Host '== 1/5 取 Node core 源码（sparse clone，只拿用得到的目录）'
+          Write-Host '== 1/3 取 Node core 源码（sparse clone，只拿用得到的目录）'
           if (Test-Path core-src) { Remove-Item -Recurse -Force core-src }
           git clone --depth 1 --filter=blob:none --sparse --branch $env:CORE_REF "https://github.com/$env:CORE_REPO.git" core-src
           if ($LASTEXITCODE -ne 0) { throw "clone $env:CORE_REPO@$env:CORE_REF 失败" }
@@ -79,27 +79,17 @@ jobs:
           if (-not (Test-Path 'core-src/packages/mitmproxy/package.json')) { throw 'core-src 缺少 mitmproxy（engine=node 不可用）' }
           if (-not (Test-Path 'core-src/packages/gui/extra/sysproxy.exe')) { throw 'core-src 缺少 gui/extra/sysproxy.exe' }
 
-          Write-Host '== 2/5 准备 pnpm（core 仓库的 workspace 用 workspace:* 协议，npm 装不了）'
+          Write-Host '== 2/3 准备 pnpm（core 仓库的 workspace 用 workspace:* 协议，npm 装不了）'
           $pnpmVersion = '12.14.0'   # 与 dev-sidecar 的 packageManager 字段一致
           npm install -g "pnpm@$pnpmVersion" --no-audit --no-fund
           if ($LASTEXITCODE -ne 0) { throw '安装 pnpm 失败' }
 
-          Write-Host '== 3/5 组装 core-bundle（pnpm 解析版本冲突 → 真实文件树 → 体积门禁 → require 自检）'
+          Write-Host '== 3/3 组装 core-bundle（pnpm 解析版本冲突 → 真实文件树 → node 运行时 → 体积门禁 → require 自检）'
           $env:PNPM_BIN = 'pnpm'
           node scripts/prepare-core-bundle.mjs --dev-sidecar core-src --max-mb $env:CORE_BUNDLE_MAX_MB
           if ($LASTEXITCODE -ne 0) { throw 'core-bundle 组装/自检失败' }
 
-          Write-Host '== 4/5 构建控制面（Node SEA）'
-          npm install -g postject --no-audit --no-fund
-          node core-host/scripts/build-sea.js
-          if ($LASTEXITCODE -ne 0) { throw 'Node SEA 构建失败' }
-
-          Write-Host '== 5/5 摆放 sidecar 二进制（缺文件直接失败，不允许静默跳过）'
-          pwsh -File scripts/prepare-binaries.ps1 -Strict
-          if ($LASTEXITCODE -ne 0) { throw 'sidecar 二进制缺失' }
-
           Write-Host '== 组装结果'
-          Get-ChildItem app/src-tauri/binaries | Select-Object Name,Length | Format-Table -AutoSize | Out-String | Write-Host
           $bundleMb = [math]::Round(((Get-ChildItem app/src-tauri/core-bundle -Recurse -File | Measure-Object Length -Sum).Sum / 1MB), 1)
           Write-Host "core-bundle = $bundleMb MB（门禁 $env:CORE_BUNDLE_MAX_MB MB）"
 

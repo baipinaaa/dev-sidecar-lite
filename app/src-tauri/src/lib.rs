@@ -1,7 +1,8 @@
 //! DevSidecar Lite 的 Tauri 壳。
 //!
 //! 职责边界：
-//! - **不做代理**：数据面是 `ds-proxy.exe`（Rust），控制面是 `ds-core-host.exe`（Node core）
+//! - **不做代理**：数据面是 Node mitmproxy（由控制面 `fork` 拉起），控制面是
+//!   `node.exe core-bundle/core-host/main.js`（Node core）
 //! - **只做桥接**：前端 `invoke('api_invoke')` → 这里 → HTTP → core-host
 //! - **托盘与单实例**：`PAC 分流`、`系统代理`、`代理服务` 三个复选框与首页开关同源
 //!

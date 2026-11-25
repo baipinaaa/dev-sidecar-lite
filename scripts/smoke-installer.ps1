@@ -5,15 +5,14 @@
 
 .DESCRIPTION
     为什么需要它：0.1.0 的安装包「能装上、能双击、点了没反应」，因为打包流程没有把
-    core-bundle 放进安装目录，而且几个 workflow 里 `if-no-files-found: warn`
-    与 `prepare-binaries.ps1` 的 `[skip]` 让空壳包一路绿灯发出去。
+    core-bundle 放进安装目录，而且 workflow 里 `if-no-files-found: warn` 让空壳包一路绿灯发出去。
     这个脚本只做「装完之后到底能不能跑」这一件事，任何一个环节不通就 exit 1。
 
     断言链：
-      1. 静默安装成功，`$INSTDIR` 里 exe 齐全（ds-core-host.exe）
+      1. 静默安装成功，`$INSTDIR` 里有 node 运行时与 core-bundle
       2. core-bundle 真的在安装目录里（`core-bundle/node_modules/@blue-frontier/dev-sidecar`）
       3. `core-bundle/extra/sysproxy.exe` 存在（缺它则系统代理/PAC 全不可用）
-      4. 用**安装目录里的** ds-core-host.exe 起控制面：`/healthz` 正常
+      4. 用**安装目录里的** node + core-bundle/core-host/main.js 起控制面：`/healthz` 正常
       5. `getApiList` 覆盖前端需要的接口名
       6. `server.start` → `HEAD /pac.js` 返回 200（数据面真的在跑）
       7. `server.close` 后端口释放
@@ -82,8 +81,10 @@ if (-not $isAdmin) {
 
 $installDir = Join-Path $env:ProgramFiles 'DevSidecar Lite'
 $appExe = Join-Path $installDir 'DevSidecar Lite.exe'
-$coreHostExe = Join-Path $installDir 'ds-core-host.exe'
 $bundleDir = Join-Path $installDir 'core-bundle'
+# 控制面 = 随包的 node 运行时 + core-bundle 里的 js（v0.3.0 起不再是 SEA 单文件 exe）
+$nodeExe = Join-Path $bundleDir 'node/node.exe'
+$entryJs = Join-Path $bundleDir 'core-host/main.js'
 $corePkg = Join-Path $bundleDir 'node_modules/@blue-frontier/dev-sidecar'
 $mitmproxyPkg = Join-Path $bundleDir 'node_modules/@blue-frontier/mitmproxy'
 $extraDir = Join-Path $bundleDir 'extra'
@@ -137,7 +138,7 @@ function Uninstall-App {
         break
     }
     Wait-Until -TimeoutSeconds 60 -What '卸载完成' -Condition {
-        -not (Test-Path $coreHostExe)
+        -not (Test-Path $entryJs)
     } | Out-Null
 }
 
@@ -176,33 +177,34 @@ try {
 
     # 不要把主程序 exe 名写死：Tauri 用 productName 命名，改过 productName/mainBinaryName
     # 就会出现「装好了但脚本等不到 DevSidecar Lite.exe」这种假失败
-    if (-not (Wait-Until -TimeoutSeconds 120 -What '安装目录出现 exe' -Condition {
-                (Test-Path $coreHostExe) -and (Test-Path (Join-Path $bundleDir 'node_modules'))
+    if (-not (Wait-Until -TimeoutSeconds 180 -What '安装目录出现 core-bundle' -Condition {
+                (Test-Path $nodeExe) -and (Test-Path (Join-Path $bundleDir 'node_modules'))
             })) {
         Show-Diagnostics
         # 兜底：万一 NSIS 把目录名换了（productName 带后缀等），只要里面有一份带
-        # ds-core-host.exe 的目录就认它，继续验证真实布局
+        # core-bundle/node/node.exe 的目录就认它，继续验证真实布局
         $alt = @($env:ProgramFiles, ${env:ProgramFiles(x86)}, (Join-Path $env:LOCALAPPDATA 'Programs')) |
             Where-Object { $_ -and (Test-Path $_) } |
             ForEach-Object { Get-ChildItem $_ -Directory -ErrorAction SilentlyContinue } |
-            Where-Object { Test-Path (Join-Path $_.FullName 'ds-core-host.exe') } |
+            Where-Object { Test-Path (Join-Path $_.FullName 'core-bundle/node/node.exe') } |
             Select-Object -First 1
         if ($alt) {
             Write-Host "    [WARN] 安装目录名与预期不同，改用：$($alt.FullName)" -ForegroundColor Yellow
             $installDir = $alt.FullName
             $appExe = Join-Path $installDir 'DevSidecar Lite.exe'
-            $coreHostExe = Join-Path $installDir 'ds-core-host.exe'
-                        $bundleDir = Join-Path $installDir 'core-bundle'
+            $bundleDir = Join-Path $installDir 'core-bundle'
+            $nodeExe = Join-Path $bundleDir 'node/node.exe'
+            $entryJs = Join-Path $bundleDir 'core-host/main.js'
             $corePkg = Join-Path $bundleDir 'node_modules/@blue-frontier/dev-sidecar'
             $mitmproxyPkg = Join-Path $bundleDir 'node_modules/@blue-frontier/mitmproxy'
             $extraDir = Join-Path $bundleDir 'extra'
         } else {
-            $detail = "安装后没有找到 $appExe / $coreHostExe（安装器退出码 $($installProc.ExitCode)）"
+            $detail = "安装后没有找到 $appExe / $nodeExe（安装器退出码 $($installProc.ExitCode)）"
             throw $detail
         }
     }
     $mainExe = Get-ChildItem $installDir -Filter '*.exe' -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -notin @('ds-core-host.exe', 'uninstall.exe') } |
+        Where-Object { $_.Name -notin @('node.exe', 'uninstall.exe') } |
         Select-Object -First 1
     if ($mainExe) {
         $appExe = $mainExe.FullName
@@ -213,6 +215,14 @@ try {
     Write-Host "    安装完成（主程序：$(if ($appExe) { $appExe } else { '未找到' })）"
 
     Write-Host '==> 2/8 校验安装布局'
+    if (-not (Test-Path $nodeExe)) {
+        $detail = "缺少 node 运行时：$nodeExe（打包步骤没跑 prepare-core-bundle）"
+        throw $detail
+    }
+    if (-not (Test-Path $entryJs)) {
+        $detail = "缺少控制面入口：$entryJs"
+        throw $detail
+    }
     if (-not (Test-Path (Join-Path $corePkg 'package.json'))) {
         $detail = "缺少 core：$corePkg（打包步骤没跑 prepare-core-bundle）"
         throw $detail
@@ -238,11 +248,11 @@ try {
     $env:HOME = $homeDir
     $env:DS_DATA_DIR = $dataDir
 
-    Write-Host '==> 4/8 启动控制面（安装目录里的 ds-core-host.exe）'
+    Write-Host '==> 4/8 启动控制面（随包 node + core-bundle/core-host/main.js）'
     $stdout = Join-Path $work 'core-host.out.log'
     $stderr = Join-Path $work 'core-host.err.log'
-    $proc = Start-Process -FilePath $coreHostExe `
-        -ArgumentList '--port', $Port, '--no-startup' `
+    $proc = Start-Process -FilePath $nodeExe `
+        -ArgumentList $entryJs, '--port', $Port, '--no-startup' `
         -RedirectStandardOutput $stdout -RedirectStandardError $stderr `
         -PassThru -WindowStyle Hidden
 
@@ -259,7 +269,7 @@ try {
     } | Out-Null
 
     if ($proc.HasExited) {
-        $detail = "ds-core-host.exe 启动即退出（exit=$($proc.ExitCode)）"
+        $detail = "控制面启动即退出（exit=$($proc.ExitCode)）"
         throw $detail
     }
     if (-not $health) {
@@ -354,7 +364,7 @@ try {
         $installed = $false
     } else {
         Uninstall-App
-        if ((Test-Path $coreHostExe) -or ($appExe -and (Test-Path $appExe))) {
+        if ((Test-Path $entryJs) -or ($appExe -and (Test-Path $appExe))) {
             $detail = '卸载之后安装目录里仍有主程序'
             throw $detail
         }
@@ -371,7 +381,8 @@ try {
         Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
     }
     # 数据面子进程是 fork 出来的，杀父进程不一定带走它
-    Get-CimInstance Win32_Process -Filter "Name='ds-core-host.exe' OR Name='node.exe'" -ErrorAction SilentlyContinue |
+    Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -like '*core-bundle*' } |
         Where-Object { $_.CommandLine -like "*$installDir*" -or $_.CommandLine -like "*$work*" } |
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 
@@ -383,11 +394,11 @@ try {
 
 Write-Host ''
 if (Test-Path (Join-Path $work 'core-host.out.log')) {
-    Write-Host '--- ds-core-host stdout（末尾 30 行）---'
+    Write-Host '--- core-host stdout（末尾 30 行）---'
     Get-Content (Join-Path $work 'core-host.out.log') -Tail 30
 }
 if (Test-Path (Join-Path $work 'core-host.err.log')) {
-    Write-Host '--- ds-core-host stderr（末尾 30 行）---'
+    Write-Host '--- core-host stderr（末尾 30 行）---'
     Get-Content (Join-Path $work 'core-host.err.log') -Tail 30
 }
 

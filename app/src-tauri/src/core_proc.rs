@@ -1,8 +1,11 @@
-//! 控制面进程（`ds-core-host.exe`）的启停。
+//! 控制面进程（`node.exe core-bundle/core-host/main.js`）的启停。
 //!
 //! 为什么需要它：GUI 只是壳，所有「配置/服务/系统代理/PAC/插件」都在 core 里。
 //! 之前没有这段代码，安装后点任何按钮都只会得到「core-host 不可达」，
 //! 用户看到的就是「点了没反应」。
+//!
+//! v0.3.0 起控制面不再是 SEA 单文件 exe，而是「随包的 node 运行时 + 磁盘上的 js」：
+//! 这样 `fork()` 与 `require()` 都是原生语义，不再需要 fork 改写与 createRequire 兜底。
 
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
@@ -76,16 +79,18 @@ impl CoreProcess {
             return;
         }
 
-        let Some(exe) = locate_core_host() else {
-            warn!("找不到 ds-core-host.exe，控制面不会启动（界面操作都会失败）");
+        let node = locate_node();
+        let Some(entry) = locate_entry() else {
+            warn!("找不到 core-bundle/core-host/main.js，控制面不会启动（界面操作都会失败）");
             return;
         };
 
-        info!("启动 core-host：{}", exe.display());
+        info!("启动 core-host：{} {}", node.display(), entry.display());
 
         let port = CORE_PORT.to_string();
-        let mut command = Command::new(&exe);
+        let mut command = Command::new(&node);
         command
+            .arg(&entry)
             .args([
                 "--host",
                 CORE_HOST,
@@ -126,7 +131,7 @@ impl CoreProcess {
         }
     }
 
-    /// 结束控制面。用 `taskkill /T` 连带子进程（core 会 fork Node 引擎或拉起 ds-proxy）。
+    /// 结束控制面。用 `taskkill /T` 连带子进程（core 会 fork 出数据面）。
     pub fn stop(&self) {
         let mut guard = self.child.lock().unwrap();
         if let Some(mut child) = guard.take() {
@@ -155,14 +160,37 @@ fn port_open(port: u16) -> bool {
     TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok()
 }
 
-/// 安装包里 `ds-core-host.exe` 与主程序同级；开发时 tauri 会把它复制到
-/// `target/<triple>/<profile>/ds-core-host-x86_64-pc-windows-msvc.exe`。
-fn locate_core_host() -> Option<PathBuf> {
+/// 安装包里的 Node 运行时：`$INSTDIR/core-bundle/node/node.exe`（随 Tauri resources 下发）。
+///
+/// 开发环境没有 core-bundle 时回退到 PATH 里的 `node`（`dev-sidecar-lite/app` 下 `npm run tauri:dev` 常用）。
+fn locate_node() -> PathBuf {
+    let Some(exe_dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) else {
+        return PathBuf::from("node");
+    };
+    let candidates = [
+        exe_dir.join("core-bundle").join("node").join("node.exe"),
+        exe_dir.join("resources").join("core-bundle").join("node").join("node.exe"),
+        // 开发布局：app/src-tauri/target/<profile> → app/src-tauri/core-bundle
+        exe_dir.join("..").join("..").join("core-bundle").join("node").join("node.exe"),
+    ];
+
+    candidates
+        .into_iter()
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| PathBuf::from("node"))
+}
+
+/// 控制面入口：`$INSTDIR/core-bundle/core-host/main.js`。
+fn locate_entry() -> Option<PathBuf> {
     let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
     let candidates = [
-        exe_dir.join("ds-core-host.exe"),
-        exe_dir.join("ds-core-host-x86_64-pc-windows-msvc.exe"),
-        exe_dir.join("core-host").join("ds-core-host.exe"),
+        exe_dir.join("core-bundle").join("core-host").join("main.js"),
+        exe_dir
+            .join("resources")
+            .join("core-bundle")
+            .join("core-host")
+            .join("main.js"),
+        exe_dir.join("..").join("..").join("core-bundle").join("core-host").join("main.js"),
     ];
 
     candidates.into_iter().find(|path| path.is_file())

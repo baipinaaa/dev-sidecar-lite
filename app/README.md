@@ -2,7 +2,7 @@
 
 Tauri 2 + Vue 3 的展示面。**它不做代理**，只负责：
 
-- 把前端调用转发给控制面 `ds-core-host.exe`（Node core）
+- 把前端调用转发给控制面（随包的 `node.exe` 跑 `core-bundle/core-host/main.js`，Node core）
 - 订阅控制面的 SSE，把 `status` / `speed` / `traffic` / `log` 推给界面
 - 托盘菜单与首页开关共用一套互斥逻辑（托盘只发事件 `tray-toggle`，由前端处理）
 
@@ -20,7 +20,7 @@ app/
 └─ src-tauri/
    ├─ src/lib.rs           # 命令：api_invoke / core_info / start_status_stream / legacy_check
    ├─ src/main.rs
-   ├─ tauri.conf.json      # externalBin: ds-core-host
+   ├─ tauri.conf.json      # resources: core-bundle/**（含 node 运行时，无 sidecar exe）
    └─ capabilities/default.json
 ```
 
@@ -41,18 +41,14 @@ npm run dev                # http://127.0.0.1:5273
 ## 构建
 
 ```powershell
-# 1) 先构建控制面（数据面是 Node mitmproxy，随 core-bundle 下发，不需要编译）
+# 1) 组装 core-bundle（core + mitmproxy + extra + core-host + 随包的 node.exe）
 cd ..
-cd core-host; npm ci; npm run build   # 产出 core-host/dist/ds-core-host.exe
-cd ..
+node scripts/prepare-core-bundle.mjs --dev-sidecar <dev-sidecar 仓库>
 
-# 2) 摆好 sidecar（文件名必须带目标三元组后缀）
-pwsh -File scripts/prepare-binaries.ps1
+# 2) 图标（首次）
+cd app; npx tauri icon ../assets/icon.png
 
-# 3) 图标（首次）
-cd app; npx tauri icon ..\assets\icon.png
-
-# 4) 打包 NSIS 安装包
+# 3) 打包 NSIS 安装包
 npm run tauri:build
 ```
 

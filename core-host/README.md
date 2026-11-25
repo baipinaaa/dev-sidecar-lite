@@ -1,10 +1,10 @@
-# ds-core-host
+# core-host（控制面宿主）
 
 DevSidecar Lite 的**控制面宿主**：把 Node core（`@blue-frontier/dev-sidecar`）的 `api`
 暴露成 HTTP + SSE，供 Tauri 壳调用。
 
-它不碰数据面——代理由 core 自己拉起，`server.proxy.engine` 决定用 Node mitmproxy 还是
-Rust `ds-proxy.exe`。
+它不碰数据面——代理由 core 自己 `fork` 拉起（`@blue-frontier/mitmproxy` 的入口
+`core-host/mitmproxy-bridge.cjs`）。
 
 ## 为什么需要它
 
@@ -28,10 +28,10 @@ module.exports = expose
 `api` 的路径与 Electron 版 `$api.xxx` 完全相同（`proxy.start`、`config.save`、
 `plugin.git.start`…），所以两个前端可以逐页对照。
 
-**额外两个接口**（core 里没有，由宿主实现）：
+**额外接口**（core 里没有，由宿主实现）：
 
-- `engine.status` → `{ engine, configured, running }`
-- `engine.set` → `{ engine: "rust" | "node" | "auto" }`，写入 `config.proxy.engine` 并按新引擎重启数据面
+- `engine.status` → `{ engine: 'node', running }`（v0.3.0 只有一种数据面，形状保留以免旧前端 404）
+- `engine.set` → 同上，忽略参数
 - `api.list` → 列出所有可调用接口（调试用）
 
 ## 凭据
@@ -52,14 +52,8 @@ $env:DS_CORE_PATH = "G:\AIWORK\steam_302\dev-sidecar\packages\core"
 node core-host/src/main.js --port 31190 -v
 ```
 
-```powershell
-# 打包成单文件（需要 postject）
-cd core-host
-npm run build          # 产出 dist/ds-core-host.exe
-```
-
-发布目录约定见 `scripts/build-sea.js` 顶部注释：SEA 只打包入口脚本，`node_modules`
-仍从磁盘加载，所以安装包里要带 `resources/app/node_modules`。
+控制面不需要编译：`core-bundle/node/node.exe` 是随包的 Node 运行时，
+入口就是 `core-bundle/core-host/main.js`（由 `scripts/prepare-core-bundle.mjs` 一并摆放）。
 
 ## 自测
 

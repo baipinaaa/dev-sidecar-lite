@@ -1,7 +1,7 @@
 'use strict'
 
 /**
- * `ds-core-host` 入口。
+ * 控制面入口（由 Tauri 壳用 `core-bundle/node/node.exe` 拉起）。
  *
  * 职责：加载 Node core（控制面），起 HTTP/SSE 宿主，然后把「服务/系统代理/PAC/插件」
  * 按用户配置恢复到上次的状态。数据面由 core 自己 fork 拉起（Node mitmproxy）。
@@ -16,7 +16,6 @@ const path = require('node:path')
 const { createHost, resolveDataDir } = require('./host')
 const { createLocalApi } = require('./local-api')
 const { entryFor, resolveEngine } = require('./engine')
-const { installForkShim, BRIDGE_FLAG } = require('./fork-shim')
 const runtime = require('./runtime')
 
 function parseArgs (argv) {
@@ -212,39 +211,10 @@ function resolveBundleRoot (coreDir) {
   return null
 }
 
-/**
- * `--mitmproxy-bridge <script> <args...>`：SEA 子进程模式。
- *
- * `fork-shim.js` 把 core 的 `fork(script)` 改写成「用 SEA 自己再跑一遍，但带上这个标志」，
- * 到这里就把真正的脚本（core-host/mitmproxy-bridge.cjs）按它原本的 argv 约定加载起来。
- * 走 createRequire 而不是内联 require：脚本在磁盘上，SEA 的 embedderRequire 只认内置模块。
- */
-function runBridgeMode (rest) {
-  const script = rest[0]
-  const args = rest.slice(1)
-  if (!script) {
-    console.error('[core-host] --mitmproxy-bridge 缺少脚本路径')
-    process.exit(2)
-  }
-  process.argv = [process.argv[0], script].concat(args)
-  const nodeModule = require('node:module')
-  nodeModule.createRequire(script)(script)
-}
-
 async function main () {
-  const bridgeIndex = process.argv.indexOf(BRIDGE_FLAG)
-  if (bridgeIndex !== -1) {
-    runBridgeMode(process.argv.slice(bridgeIndex + 1))
-    return
-  }
-
   const options = parseArgs(process.argv.slice(2))
   const dataDir = options.dataDir || resolveDataDir()
   process.env.DS_DATA_DIR = dataDir
-
-  // SEA 下 core 的 fork(mitmproxyPath) 会退化成「再跑一遍自己」，必须改写（见 fork-shim.js）。
-  // 必须在 require core 之前装：core 在模块初始化时就解构了 child_process.fork。
-  installForkShim({ verbose: options.verbose })
 
   // 用户配置目录：core 里硬编码 `~/.dev-sidecar`，lite 用 `~/.dev-sidecar-lite`
   // 与原版隔离（两边同时装也不会互相踩配置文件）。必须赶在 require core 之前装。

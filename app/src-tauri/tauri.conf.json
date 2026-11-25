@@ -37,9 +37,6 @@
       "icons/icon.png",
       "icons/icon.ico"
     ],
-    "externalBin": [
-      "binaries/ds-core-host"
-    ],
     "resources": [
       "../../docs/*",
       "core-bundle/**/*"
