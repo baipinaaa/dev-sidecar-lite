@@ -23,7 +23,7 @@
       3. `server.start` 返回端口，且 `HEAD /pac.js` 返回 200（数据面真的在跑）
       4. `server.close` 后端口释放
 
-    用隔离的 `USERPROFILE`，绝不碰用户真实的 `~/.dev-sidecar`。
+    用隔离的 `USERPROFILE`，绝不碰用户真实的 `~/.dev-sidecar-lite`。
 
 .EXAMPLE
     pwsh -File scripts/smoke-core-host.ps1
@@ -97,10 +97,10 @@ New-Item -ItemType Directory -Force -Path $buildRoot | Out-Null
 $work = Join-Path $buildRoot ('smoke-' + [Guid]::NewGuid().ToString('N').Substring(0, 8))
 $dataDir = Join-Path $work 'data'
 $homeDir = Join-Path $work 'home'
-New-Item -ItemType Directory -Force -Path $work, $dataDir, (Join-Path $homeDir '.dev-sidecar') | Out-Null
+New-Item -ItemType Directory -Force -Path $work, $dataDir, (Join-Path $homeDir '.dev-sidecar-lite') | Out-Null
 
 # 隔离用户配置：core 的 getUserBasePath() 只认 USERPROFILE/HOME
-$configFile = Join-Path $homeDir '.dev-sidecar/config.json'
+$configFile = Join-Path $homeDir '.dev-sidecar-lite/config.json'
 @{
     server            = @{ port = $ProxyPort; enabled = $false; startup = $false }
     proxy             = @{ enabled = $false; pacEnabled = $false }

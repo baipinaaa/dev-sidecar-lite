@@ -95,7 +95,7 @@ New-Item -ItemType Directory -Force -Path $buildRoot | Out-Null
 $work = Join-Path $buildRoot ('installer-smoke-' + [Guid]::NewGuid().ToString('N').Substring(0, 8))
 $dataDir = Join-Path $work 'data'
 $homeDir = Join-Path $work 'home'
-New-Item -ItemType Directory -Force -Path $work, $dataDir, (Join-Path $homeDir '.dev-sidecar') | Out-Null
+New-Item -ItemType Directory -Force -Path $work, $dataDir, (Join-Path $homeDir '.dev-sidecar-lite') | Out-Null
 
 $detail = ''
 $ok = $false
@@ -238,7 +238,7 @@ try {
         server = @{ port = $ProxyPort; enabled = $false; startup = $false }
         proxy  = @{ enabled = $false; pacEnabled = $false }
         app    = @{ autoStart = @{ enabled = $false } }
-    } | ConvertTo-Json -Depth 6 | Set-Content -Path (Join-Path $homeDir '.dev-sidecar/config.json') -Encoding utf8NoBOM
+    } | ConvertTo-Json -Depth 6 | Set-Content -Path (Join-Path $homeDir '.dev-sidecar-lite/config.json') -Encoding utf8NoBOM
 
     $env:USERPROFILE = $homeDir
     $env:HOME = $homeDir

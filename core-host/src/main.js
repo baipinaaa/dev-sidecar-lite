@@ -247,6 +247,11 @@ async function main () {
   // 必须在 require core 之前装：core 在模块初始化时就解构了 child_process.fork。
   installForkShim({ verbose: options.verbose })
 
+  // 用户配置目录：core 里硬编码 `~/.dev-sidecar`，lite 用 `~/.dev-sidecar-lite`
+  // 与原版隔离（两边同时装也不会互相踩配置文件）。必须赶在 require core 之前装。
+  const userDirName = runtime.installUserDir()
+  console.log(`[core-host] 用户配置目录: ${path.join(process.env.USERPROFILE || process.env.HOME || '/', userDirName)}`)
+
   const { core, from } = resolveCore()
   const nodeEntry = resolveMitmproxyPath()
   const bundleRoot = resolveBundleRoot(from)

@@ -155,6 +155,11 @@ function loadMitmproxy () {
   fatal('加载 @blue-frontier/mitmproxy 失败（core-bundle/node_modules 是否完整？）', tried.join('\n'))
 }
 
+// 用户配置目录与 core 保持一致：mitmproxy 自己的
+// `lib/proxy/common/config.js:21` 也硬编码了 `~/.dev-sidecar`（CA 证书默认路径），
+// core 虽然会用 setting.userBasePath 覆盖，但赶在加载前统一改掉更保险。
+require('./src/runtime').installUserDir()
+
 mitmproxy = loadMitmproxy()
 
 if (typeof mitmproxy.start !== 'function') {

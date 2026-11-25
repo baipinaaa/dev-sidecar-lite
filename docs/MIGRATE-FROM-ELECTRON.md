@@ -1,9 +1,16 @@
 # 从 Electron 版迁移到 Lite
 
-两个版本**不能共存**：它们会争抢同一个本地端口（默认 `127.0.0.1:31181`）、同一份用户配置目录
-（`~/.dev-sidecar`）和同一张根证书（`Steamcommunity302`/`dev-sidecar` 同名 CA 会互相覆盖信任）。
+两个版本**不能同时运行**：它们会争抢同一个本地端口（默认 `127.0.0.1:31181`），并且签发同一张根证书
+（`dev-sidecar` 同名 CA 会互相覆盖信任，导致旧版签的证书被新版覆盖后全部失效）。
 
-正确的顺序是：**先卸旧，再装新**。
+配置目录已经从 0.2.2 起**分开**：Lite 用 `~/.dev-sidecar-lite`，原版仍然是 `~/.dev-sidecar`，
+所以两边的配置文件、日志、证书互不干扰，可以放心各留一份。
+
+正确的顺序是：**先迁移配置，再卸旧，最后装新**。
+
+> 迁移配置（可选，想沿用原版规则时做）：把 `C:\Users\<你>\.dev-sidecar\` 下的
+> `config.json`（或 `config.json5`）与 `rootCa.crt` / `rootCa.key` 一起复制到
+> `C:\Users\<你>\.dev-sidecar-lite\` 即可。不迁移也没关系，Lite 首次启动会生成一份默认配置。
 
 ## 一、卸载旧版
 
@@ -46,14 +53,15 @@ foreach ($c in $cert) { Remove-Item -Path $c.PSPath -Force }
 
 ## 三、配置怎么带过来
 
-旧版的用户配置在 `~/.dev-sidecar/config.json`，新版**沿用同一个目录**：
+旧版的用户配置在 `C:\Users\<你>\.dev-sidecar`，新版用 `C:\Users\<你>\.dev-sidecar-lite`。
+**直接把整个目录复制过去最简单**（`robocopy "%USERPROFILE%\.dev-sidecar" "%USERPROFILE%\.dev-sidecar-lite" /E`）：
 
 | 文件 | 说明 |
 | --- | --- |
 | `config.json` | 用户自定义（与默认值做 diff 后保存） |
 | `remote_config.json5` | 远程配置缓存，可整份删掉让新版重新拉 |
 | `running.json` | 运行时合并结果，**不要手改**，每次启动重写 |
-| `dev-sidecar.ca.crt` / `dev-sidecar.ca.key.pem` | 根证书，换版本可以继续用同一张 |
+| `dev-sidecar.ca.crt` / `dev-sidecar.ca.key.pem` | 根证书，换版本可以继续用同一张（**证书路径也跟着目录变，搬目录就要重新装一次证书**） |
 
 如果你之前在旧版里手改过 `running.json` 来绕过某个问题，**不要把它带到新版**：新版每次启动
 都会从 `config.json` + `remote_config.json5` 重新合并生成。

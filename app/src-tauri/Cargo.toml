@@ -1,6 +1,6 @@
 [package]
 name = "dev-sidecar-lite"
-version = "0.2.1"
+version = "0.2.2"
 description = "DevSidecar Lite 桌面壳（Tauri 2 + Vue 3）"
 authors = ["dev-sidecar-lite"]
 edition = "2021"

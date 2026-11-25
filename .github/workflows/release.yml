@@ -173,7 +173,7 @@ jobs:
           ### 说明
           - 默认数据面是 Node（与原版一致），Rust 数据面是实验通道（设置里把 proxy.engine 改成 rust）
           - 日志在 `%ProgramData%\\dev-sidecar-lite\\log\\core-host.log`
-          - 配置目录与原版共用 `C:\\Users\\<你>\\.dev-sidecar`
+          - 配置目录在 `C:\\Users\\<你>\\.dev-sidecar-lite`（与原版的 `~/.dev-sidecar` 分开，两者可共存）
           "@ | Set-Content -Path release-notes.md -Encoding utf8
 
           gh release view $tag --json tagName 2>$null | Out-Null

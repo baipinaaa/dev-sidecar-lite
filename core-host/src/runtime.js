@@ -162,8 +162,50 @@ function findInResources (...segments) {
   return hits
 }
 
+let userDirInstalled = false
+
+/**
+ * 把 core 的用户目录从 `~/.dev-sidecar` 换成 `~/.dev-sidecar-lite`。
+ *
+ * core 里是硬编码字符串：
+ *   `core/src/config/local-config-loader.js:10`  const dir = path.resolve(userHome, './.dev-sidecar')
+ *   `core/src/modules/instance/index.js:11`     path.join(USERPROFILE, '.dev-sidecar')
+ *   `core/src/shell/scripts/set-system-proxy/index.js:513`  '.dev-sidecar/proxy.env'
+ * 而且`getUserBasePath()` 在模块内部被多处**直接**调用，只改 module.exports 上的引用
+ * 没用（内部调用的是局部函数），必须赶在模块编译前改掉那个字面量。
+ *
+ * 不改 dev-sidecar 仓库的任何文件，只在运行时给 `_compile` 加一层源码替换；
+ * 只作用于 `@blue-frontier/{dev-sidecar,mitmproxy}` 下的模块，且正则带
+ * `(?![\-\w])` 保证幂等（已经是 `.dev-sidecar-lite` 的不会再被改一次）。
+ *
+ * 可用 `DS_USER_DIR_NAME` 覆盖目录名（便携版/多开测试用）。
+ */
+function installUserDir (dirName = process.env.DS_USER_DIR_NAME || '.dev-sidecar-lite') {
+  if (userDirInstalled) {
+    return dirName
+  }
+  const Module = require('node:module')
+  const originalCompile = Module.prototype._compile
+  // `path.resolve(userHome, './.dev-sidecar')`、`path.join(x, '.dev-sidecar')`、
+  // `'.dev-sidecar/proxy.env'` 三种写法都要盖到，所以直接匹配那一段字面量；
+  // `(?![-.\w])` 保证幂等（已经是 `.dev-sidecar-lite` 的不会再被改）。
+  const pattern = /\.dev-sidecar(?![-.\w])/g
+  const inBundle = /@blue-frontier[\\/](?:dev-sidecar|mitmproxy)[\\/]/
+
+  Module.prototype._compile = function (content, filename, ...rest) {
+    if (typeof content === 'string' && filename && inBundle.test(filename)) {
+      content = content.replace(pattern, dirName)
+    }
+    return originalCompile.call(this, content, filename, ...rest)
+  }
+
+  userDirInstalled = true
+  return dirName
+}
+
 module.exports = {
   installPackageAliases,
+  installUserDir,
   isSea,
   requireFrom,
   installRoots,
