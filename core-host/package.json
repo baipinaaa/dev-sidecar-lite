@@ -1,6 +1,6 @@
 {
   "name": "ds-core-host",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "private": true,
   "description": "DevSidecar Lite 的控制面宿主：把 Node core 的 API 暴露给 Tauri 壳",
   "type": "commonjs",
