@@ -110,6 +110,28 @@ function tryRequire (dir) {
  * 打包形态下 SEA 只打入口脚本，core 是运行时才 require 的，所以必须随安装包下发。
  */
 function resolveCore () {
+  const fs = require('node:fs')
+
+  // 打平布局（S3/L2）：整个 core 在 <bundle>/bundle/core.cjs 里，优先用它。
+  // 这一层是为了「安装后没有 node_modules」，是文件数从三千降到几百的关键。
+  const bundledCandidates = [
+    process.env.DS_CORE_BUNDLE && path.join(process.env.DS_CORE_BUNDLE, 'bundle', 'core.cjs'),
+    ...runtime.findInResources('core-bundle', 'bundle', 'core.cjs'),
+  ].filter(Boolean)
+  for (const file of bundledCandidates) {
+    if (!fs.existsSync(file)) {
+      continue
+    }
+    try {
+      const bundleModule = require(file)
+      if (bundleModule && bundleModule.api) {
+        return { core: { api: bundleModule.api }, from: file, bundleModule }
+      }
+    } catch (err) {
+      console.error(`[core-host] 加载打平产物失败: ${file} → ${err && err.message ? err.message : err}`)
+    }
+  }
+
   const packaged = runtime.installRoots().flatMap((root) => [
     // 实测安装布局：core-bundle 与主程序同级（$INSTDIR/core-bundle/…）
     path.join(root, 'core-bundle', 'node_modules', '@blue-frontier', 'dev-sidecar'),
@@ -128,8 +150,6 @@ function resolveCore () {
     path.join(__dirname, '../../dev-sidecar/packages/core'),
     ...packaged,
   ].filter(Boolean)
-
-  const fs = require('node:fs')
 
   for (const candidate of candidates) {
     // 候选是本地目录时，先把 @blue-frontier/* 映射过去再 require：
@@ -166,9 +186,15 @@ function resolveMitmproxyPath () {
   // 路线 4：默认引擎是 Node，但入口不是 mitmproxy 的 index.js（它是库，不读 argv[2]），
   // 而是本仓库的 bridge（读 running.json → start(config)）。
   const packaged = runtime.findInResources('core-bundle', 'core-host', 'mitmproxy-bridge.cjs')
+  // 打平布局：数据面整包打成了 <bundle>/bundle/mitmproxy.cjs
+  const bundled = [
+    process.env.DS_CORE_BUNDLE && path.join(process.env.DS_CORE_BUNDLE, 'bundle', 'mitmproxy.cjs'),
+    ...runtime.findInResources('core-bundle', 'bundle', 'mitmproxy.cjs'),
+  ].filter(Boolean)
 
   const candidates = [
     process.env.DS_MITMPROXY_PATH,
+    ...bundled,
     path.join(__dirname, '..', 'mitmproxy-bridge.cjs'),
     ...packaged,
   ].filter(Boolean)
@@ -191,8 +217,12 @@ function bundleRootFromCore (coreDir) {
   if (!coreDir || !path.isAbsolute(coreDir)) {
     return null
   }
-  const marker = path.join('node_modules', '@blue-frontier', 'dev-sidecar')
   const normalized = coreDir.replace(/[\/]+$/, '')
+  // 打平布局：<bundle>/bundle/core.cjs
+  if (/[\/]bundle[\/][^\/]+\.cjs$/.test(normalized)) {
+    return path.resolve(normalized, '..', '..')
+  }
+  const marker = path.join('node_modules', '@blue-frontier', 'dev-sidecar')
   if (!normalized.endsWith(marker)) {
     return null
   }
@@ -279,7 +309,7 @@ async function main () {
   const userDirName = runtime.installUserDir()
   console.log(`[core-host] 用户配置目录: ${path.join(process.env.USERPROFILE || process.env.HOME || '/', userDirName)}`)
 
-  const { core, from } = resolveCore()
+  const { core, from, bundleModule } = resolveCore()
   const nodeEntry = resolveMitmproxyPath()
   const bundleRoot = resolveBundleRoot(from)
 
@@ -328,6 +358,7 @@ async function main () {
   const localApi = createLocalApi({
     core,
     coreDir: path.isAbsolute(from) ? from : null,
+    bundleModule,
     mitmproxyPath: nodeEntry,
     bundleRoot: bundleRoot || process.cwd(),
     emit: (channel, payload) => {

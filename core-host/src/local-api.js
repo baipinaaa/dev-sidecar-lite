@@ -151,12 +151,16 @@ function createLocalApi (options) {
   const emit = options.emit || (() => {})
 
   const pkgReq = packageRequire(options.coreDir)
-  const lodash = pkgReq('lodash')
-  const jsonApi = pkgReq('@blue-frontier/mitmproxy/src/json.js')
-  const configLoader = pkgReq('@blue-frontier/dev-sidecar/src/config/local-config-loader.js')
-  const loggerFactory = pkgReq('@blue-frontier/dev-sidecar/src/utils/util.logger.js')
-  const serviceGroup = pkgReq('@blue-frontier/dev-sidecar/src/service-group.js')
-  const coreConfig = pkgReq('@blue-frontier/dev-sidecar/src/config/index.js')
+  // 打平布局（S3/L2）下这些模块已经打进 bundle/core.cjs，由 core-entry.js 统一导出；
+  // 磁盘上不再有 node_modules，所以优先从 bundleModule 取。
+  const bundled = options.bundleModule || null
+  const pick = (key, name) => (bundled && bundled[key] ? bundled[key] : pkgReq(name))
+  const lodash = pick('lodash', 'lodash')
+  const jsonApi = pick('json', '@blue-frontier/mitmproxy/src/json.js')
+  const configLoader = pick('localConfigLoader', '@blue-frontier/dev-sidecar/src/config/local-config-loader.js')
+  const loggerFactory = pick('loggerFactory', '@blue-frontier/dev-sidecar/src/utils/util.logger.js')
+  const serviceGroup = pick('serviceGroup', '@blue-frontier/dev-sidecar/src/service-group.js')
+  const coreConfig = pick('coreConfig', '@blue-frontier/dev-sidecar/src/config/index.js')
 
   const coreDefaultConfig = coreConfig.defaultConfig
 
@@ -281,12 +285,12 @@ function createLocalApi (options) {
         return loggerFactory.getLogDir()
       },
       async securityMigrate () {
-        const migrate = pkgReq('@blue-frontier/dev-sidecar/src/utils/util.security-migrate')
+        const migrate = pick('securityMigrate', '@blue-frontier/dev-sidecar/src/utils/util.security-migrate')
         return migrate.runMigration_to3_0_0()
       },
       async redactLogs () {
         const dir = loggerFactory.getLogDir()
-        const { redactLogDir } = pkgReq('@blue-frontier/dev-sidecar/src/utils/util.redact-logs')
+        const { redactLogDir } = pick('redactLogs', '@blue-frontier/dev-sidecar/src/utils/util.redact-logs')
         return redactLogDir(dir)
       },
       getSystemPlatform (throwIfUnknown = false) {

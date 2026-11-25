@@ -27,7 +27,7 @@ function parseArgs (argv) {
   const opts = {
     devSidecar: path.resolve(liteRoot, '..', 'dev-sidecar'),
     out: path.resolve(liteRoot, 'app', 'src-tauri', 'core-bundle'),
-    maxMb: 70,
+    maxMb: 140,
     keep: false,
     pnpm: process.env.PNPM_BIN || 'pnpm',
   }
@@ -38,6 +38,7 @@ function parseArgs (argv) {
       case '--max-mb': opts.maxMb = Number(argv[++i]); break
       case '--pnpm': opts.pnpm = argv[++i]; break
       case '--keep': opts.keep = true; break
+      case '--no-bundle': opts.noBundle = true; break
       case '-h':
       case '--help':
         console.log(fs.readFileSync(fileURLToPath(import.meta.url), 'utf-8').split('*/')[0])
@@ -268,37 +269,74 @@ function main () {
     // 2) 装依赖（hoisted = 全是真实文件，无符号链接；版本冲突时 pnpm 自动嵌套）
     run(opts.pnpm, ['install', '--prod', '--no-frozen-lockfile', '--config.strict-dep-builds=false', '--config.node-linker=hoisted'], work)
 
-    // 3) 组包
+    // 2.5) 输出目录骨架（3.x 直接往里拷）
     fs.rmSync(opts.out, { recursive: true, force: true })
     fs.mkdirSync(opts.out, { recursive: true })
 
-    // 3.1 node_modules：hoisted 树的顶层都是真实文件；.pnpm 是硬链接存储（打包时会翻倍），删掉
-    const depsOut = path.join(opts.out, 'node_modules')
-    fs.cpSync(path.join(work, 'node_modules'), depsOut, {
-      recursive: true,
-      dereference: false,
-      filter: (src) => !src.startsWith(path.join(work, 'node_modules', '.pnpm')) &&
-        !src.startsWith(path.join(work, 'node_modules', '@blue-frontier')),
-    })
-    // 先把残留符号链接清掉，避免后面的写入穿透链接写回临时目录
-    removeSymlinks(depsOut)
-
-    // 3.2 两个包放到 @blue-frontier/ 下（原版就是这么 require 的），
-    //     带上它们自己的 node_modules（pnpm 把版本冲突的依赖嵌套在那里）
-    for (const dir of ['core', 'mitmproxy']) {
-      const pkgFile = path.join(work, 'packages', dir, 'package.json')
-      const pkgName = readJson(pkgFile).name
-      const [scope, name] = pkgName.startsWith('@') ? pkgName.split('/') : ['', pkgName]
-      const target = scope ? path.join(depsOut, scope, name) : path.join(depsOut, name)
-      console.log(`[core-bundle] ${dir} -> node_modules/${pkgName}`)
-      copyTree(path.join(work, 'packages', dir), target, { includeNodeModules: true })
+    // 2.6) L2 打平：把 core 与 mitmproxy 打成一个 cjs（node_modules 的文件数从 3600+ 降到几十）
+    let bundled = false
+    if (!opts.noBundle) {
+      const esbuildDir = path.join(liteRoot, '.build', 'esbuild')
+      if (!fs.existsSync(path.join(esbuildDir, 'node_modules', 'esbuild', 'package.json'))) {
+        fs.mkdirSync(esbuildDir, { recursive: true })
+        console.log('[core-bundle] 安装 esbuild（首次需要联网）')
+        run('npm', ['install', 'esbuild@0.24.0', '--no-save', '--no-audit', '--no-fund', '--loglevel', 'error'], esbuildDir)
+      }
+      console.log('[core-bundle] 打平 core 与 mitmproxy ...')
+      run(process.execPath, [
+        path.join(liteRoot, 'scripts', 'build-bundles.mjs'),
+        '--workspace', work,
+        '--esbuild', esbuildDir,
+        '--out', opts.out,
+        '--targets', 'mitmproxy,core',
+        '--core-entry', path.join(liteRoot, 'core-host', 'core-entry.js'),
+        '--bridge-entry', path.join(liteRoot, 'core-host', 'bridge-entry.cjs'),
+      ], liteRoot)
+      bundled = true
     }
 
-    // 3.3 清掉残留的符号链接与空的 .bin（Tauri/NSIS 打包时会丢链接）
-    removeSymlinks(depsOut)
+    // 3) 组包
+    const depsOut = path.join(opts.out, 'node_modules')
 
-    // 3.4 修剪文档/测试/示例/sourcemap：安装后文件数从 4000+ 降到 3000 以内
-    {
+    if (bundled) {
+      // 打平后 node_modules 只需要留下走原生/可选二进制的那几个包
+      const keepPkgs = ['koffi', '@starknt/sysproxy', 'wreq-js', 'keytar']
+      for (const name of keepPkgs) {
+        const src = path.join(work, 'node_modules', ...name.split('/'))
+        if (!fs.existsSync(src)) {
+          continue
+        }
+        const dst = path.join(depsOut, ...name.split('/'))
+        fs.mkdirSync(path.dirname(dst), { recursive: true })
+        copyTree(src, dst, { includeNodeModules: true })
+        console.log(`[core-bundle] 保留原生依赖 ${name}`)
+      }
+      removeSymlinks(depsOut)
+      console.log(`[core-bundle] 打平后 node_modules: ${countFiles(depsOut)} 文件`)
+    } else {
+      // 3.1 node_modules：hoisted 树的顶层都是真实文件；.pnpm 是硬链接存储（打包时会翻倍），删掉
+      fs.cpSync(path.join(work, 'node_modules'), depsOut, {
+        recursive: true,
+        dereference: false,
+        filter: (src) => !src.startsWith(path.join(work, 'node_modules', '.pnpm')) &&
+          !src.startsWith(path.join(work, 'node_modules', '@blue-frontier')),
+      })
+      removeSymlinks(depsOut)
+
+      // 3.2 两个包放到 @blue-frontier/ 下（原版就是这么 require 的），
+      //     带上它们自己的 node_modules（pnpm 把版本冲突的依赖嵌套在那里）
+      for (const dir of ['core', 'mitmproxy']) {
+        const pkgFile = path.join(work, 'packages', dir, 'package.json')
+        const pkgName = readJson(pkgFile).name
+        const [scope, name] = pkgName.startsWith('@') ? pkgName.split('/') : ['', pkgName]
+        const target = scope ? path.join(depsOut, scope, name) : path.join(depsOut, name)
+        console.log(`[core-bundle] ${dir} -> node_modules/${pkgName}`)
+        copyTree(path.join(work, 'packages', dir), target, { includeNodeModules: true })
+      }
+
+      removeSymlinks(depsOut)
+
+      // 3.4 修剪文档/测试/示例/sourcemap
       const before = countFiles(depsOut)
       const removed = pruneNodeModules(depsOut)
       const after = countFiles(depsOut)
@@ -307,6 +345,7 @@ function main () {
         `（删 ${removed.files} 个文件 / ${removed.dirs} 个测试示例目录）`,
       )
     }
+
     // 4) extra/：sysproxy.exe、EnableLoopback.exe、scripts/、proxy/、pac/
     copyTree(path.join(opts.devSidecar, 'packages', 'gui', 'extra'), path.join(opts.out, 'extra'))
 
@@ -318,7 +357,11 @@ function main () {
     //     安装后每次开系统代理都报「读取失败」并去联网下载（离线必失败）。
     {
       const src = path.join(opts.devSidecar, 'packages', 'gui', 'extra', 'proxy', 'domestic-domain-allowlist.txt')
-      const dst = path.join(depsOut, '@blue-frontier', 'dev-sidecar', 'src', 'shell', 'scripts', 'extra', 'proxy')
+      // 打平布局下 core 的 __dirname 被搬到 bundle/res/packages/core/<相对包根>，
+      // 所以白名单文件要放到镜像目录里（build-bundles.mjs 的镜像逻辑不覆盖它，因为上游 core 里没有这个文件）
+      const dst = bundled
+        ? path.join(opts.out, 'bundle', 'res', 'packages', 'core', 'src', 'shell', 'scripts', 'extra', 'proxy')
+        : path.join(depsOut, '@blue-frontier', 'dev-sidecar', 'src', 'shell', 'scripts', 'extra', 'proxy')
       if (fs.existsSync(src)) {
         fs.mkdirSync(dst, { recursive: true })
         fs.copyFileSync(src, path.join(dst, 'domestic-domain-allowlist.txt'))
@@ -360,21 +403,33 @@ function main () {
       throw new Error(`core-bundle 超过体积门禁：${mb.toFixed(1)} MB > ${opts.maxMb} MB`)
     }
 
-    // 8) 自检：能不能真的 require 起来（用 @blue-frontier/ 名字，跟运行时一致）
-    const probe = [
-      `const core = require('@blue-frontier/dev-sidecar')`,
-      `if (!core.api) throw new Error('core.api 缺失')`,
-      `const conf = core.api.config.get()`,
-      `const intercepts = Object.keys(conf.server.intercepts || {}).length`,
-      `if (intercepts < 100) throw new Error('intercepts 数量异常: ' + intercepts)`,
-      `const mitm = require('@blue-frontier/mitmproxy')`,
-      `if (typeof mitm.start !== 'function') throw new Error('mitmproxy.start 缺失')`,
-      `const merge = require('@blue-frontier/dev-sidecar/src/merge')`,
-      `if (typeof merge !== 'object' && typeof merge !== 'function') throw new Error('core/src/merge 导出异常')`,
-      `const match = require('@blue-frontier/mitmproxy/src/utils/util.match')`,
-      `if (typeof match.matchHostname !== 'function') throw new Error('util.match 导出异常')`,
-      `console.log('[core-bundle] 自检通过, intercepts=' + intercepts)`,
-    ].join(';')
+    // 8) 自检：能不能真的 require 起来
+    const probe = bundled
+      ? [
+          `const path = require('node:path')`,
+          `const core = require(path.join(process.cwd(), 'bundle', 'core.cjs'))`,
+          `if (!core.api) throw new Error('core.api 缺失')`,
+          `const intercepts = Object.keys(core.api.config.get().server.intercepts || {}).length`,
+          `if (intercepts < 100) throw new Error('intercepts 数量异常: ' + intercepts)`,
+          `if (!core.serviceGroup || typeof core.serviceGroup.listCatalog !== 'function') throw new Error('serviceGroup 缺失')`,
+          `if (typeof core.lodash.get !== 'function') throw new Error('lodash 缺失')`,
+          `const bridge = require(path.join(process.cwd(), 'bundle', 'mitmproxy.cjs'))`,
+          `console.log('[core-bundle] 打平自检通过, intercepts=' + intercepts)`,
+        ].join(';')
+      : [
+          `const core = require('@blue-frontier/dev-sidecar')`,
+          `if (!core.api) throw new Error('core.api 缺失')`,
+          `const conf = core.api.config.get()`,
+          `const intercepts = Object.keys(conf.server.intercepts || {}).length`,
+          `if (intercepts < 100) throw new Error('intercepts 数量异常: ' + intercepts)`,
+          `const mitm = require('@blue-frontier/mitmproxy')`,
+          `if (typeof mitm.start !== 'function') throw new Error('mitmproxy.start 缺失')`,
+          `const merge = require('@blue-frontier/dev-sidecar/src/merge')`,
+          `if (typeof merge !== 'object' && typeof merge !== 'function') throw new Error('core/src/merge 导出异常')`,
+          `const match = require('@blue-frontier/mitmproxy/src/utils/util.match')`,
+          `if (typeof match.matchHostname !== 'function') throw new Error('util.match 导出异常')`,
+          `console.log('[core-bundle] 自检通过, intercepts=' + intercepts)`,
+        ].join(';')
     run(process.execPath, ['-e', probe], opts.out)
   } finally {
     if (opts.keep) {

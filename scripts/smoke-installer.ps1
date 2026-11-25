@@ -10,7 +10,7 @@
 
     断言链：
       1. 静默安装成功，`$INSTDIR` 里有 node 运行时与 core-bundle
-      2. core-bundle 真的在安装目录里（`core-bundle/node_modules/@blue-frontier/dev-sidecar`）
+      2. core-bundle 真的在安装目录里（`core-bundle/bundle/core.cjs`，S3 起是打平产物）
       3. `core-bundle/extra/sysproxy.exe` 存在（缺它则系统代理/PAC 全不可用）
       4. 用**安装目录里的** node + `core-bundle/core-host/main.js --stdio` 做一次完整 RPC 冒烟：
          `ready` 帧 → `getApiList` → `server.start` → `HEAD /pac.js` 200 → `server.close` → `shutdown`
@@ -83,8 +83,8 @@ $bundleDir = Join-Path $installDir 'core-bundle'
 # 控制面 = 随包的 node 运行时 + core-bundle 里的 js（v0.3.0 起不再是 SEA 单文件 exe）
 $nodeExe = Join-Path $bundleDir 'node/node.exe'
 $entryJs = Join-Path $bundleDir 'core-host/main.js'
-$corePkg = Join-Path $bundleDir 'node_modules/@blue-frontier/dev-sidecar'
-$mitmproxyPkg = Join-Path $bundleDir 'node_modules/@blue-frontier/mitmproxy'
+$corePkg = Join-Path $bundleDir 'bundle/core.cjs'
+$mitmproxyPkg = Join-Path $bundleDir 'bundle/mitmproxy.cjs'
 $extraDir = Join-Path $bundleDir 'extra'
 
 # 中间产物留在项目内 .build/（不要写 C 盘临时目录）
@@ -193,8 +193,8 @@ try {
             $bundleDir = Join-Path $installDir 'core-bundle'
             $nodeExe = Join-Path $bundleDir 'node/node.exe'
             $entryJs = Join-Path $bundleDir 'core-host/main.js'
-            $corePkg = Join-Path $bundleDir 'node_modules/@blue-frontier/dev-sidecar'
-            $mitmproxyPkg = Join-Path $bundleDir 'node_modules/@blue-frontier/mitmproxy'
+            $corePkg = Join-Path $bundleDir 'bundle/core.cjs'
+            $mitmproxyPkg = Join-Path $bundleDir 'bundle/mitmproxy.cjs'
             $extraDir = Join-Path $bundleDir 'extra'
         } else {
             $detail = "安装后没有找到 $appExe / $nodeExe（安装器退出码 $($installProc.ExitCode)）"
@@ -222,7 +222,7 @@ try {
         throw $detail
     }
     if (-not (Test-Path (Join-Path $corePkg 'package.json'))) {
-        $detail = "缺少 core：$corePkg（打包步骤没跑 prepare-core-bundle）"
+        $detail = "缺少 core 打平产物：$corePkg（打包步骤没跑 prepare-core-bundle 或打平失败）"
         throw $detail
     }
     if (-not (Test-Path (Join-Path $mitmproxyPkg 'package.json'))) {
