@@ -190,7 +190,7 @@ async function main () {
       sourcemap: false,
       logLevel: 'warning',
       external: EXTERNALS,
-      plugins: [dirnamePlugin({ pkgDir: target.pkg, pkgName: target.name === 'core' ? 'dev-sidecar' : target.name, resRoot, userDir: opts.userDir })],
+      plugins: [dirnamePlugin({ pkgDir: target.pkg, pkgName: target.name === 'core' ? 'dev-sidecar' : target.name, resRoot, userDir: args.userDir })],
       define: { 'process.env.NODE_ENV': '"production"' },
     })
     const resCount = mirrorResources(target.pkg, target.name === 'core' ? 'dev-sidecar' : target.name, resRoot)
