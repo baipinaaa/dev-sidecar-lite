@@ -2,7 +2,7 @@
 //!
 //! 职责边界：
 //! - **不做代理**：数据面是 Node mitmproxy（由控制面 `fork` 拉起），控制面是
-//!   `node.exe core-bundle/core-host/main.js --stdio`（Node core）
+//!   `node.exe core-bundle/core-host/src/main.js --stdio`（Node core）
 //! - **只做桥接**：前端 `invoke('api_invoke')` → 这里 → stdio JSON-RPC → core-host
 //! - **托盘与单实例**：`PAC 分流`、`系统代理`、`代理服务` 三个复选框与首页开关同源
 //!

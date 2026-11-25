@@ -1,7 +1,7 @@
 #!/usr/bin/env pwsh
 <#
 .SYNOPSIS
-    冒烟测试控制面：以 stdio JSON-RPC 拉起 `core-host/main.js`，验证控制面 + 数据面都通。
+    冒烟测试控制面：以 stdio JSON-RPC 拉起 `core-host/src/main.js`，验证控制面 + 数据面都通。
 
 .DESCRIPTION
     为什么需要这个脚本：core（`@blue-frontier/dev-sidecar`）与 mitmproxy 都是运行时才

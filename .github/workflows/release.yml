@@ -147,7 +147,7 @@ jobs:
           - 从 Electron 版迁移请先卸载旧版，两者会争抢 127.0.0.1:31181
 
           ### 本版变化（0.3.0）
-          - 控制面不再打成单文件 exe：改用随包的 `node.exe` 跑 `core-bundle/core-host/main.js`
+          - 控制面不再打成单文件 exe：改用随包的 `node.exe` 跑 `core-bundle/core-host/src/main.js`
           - 界面与控制面改用管道（stdio JSON-RPC），不再占用本地端口、不再生成凭据文件
           - `core` 与 `mitmproxy` 用 esbuild 打平，`core-bundle` 的文件数从 3600+ 降到几十
           - 移除 Rust 数据面与「实验功能」页：数据面只有 Node 一条路（与 Electron 版同源）

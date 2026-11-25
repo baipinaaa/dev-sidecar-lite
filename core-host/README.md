@@ -80,7 +80,7 @@ node core-host/src/main.js --port 31190 -v
 ```
 
 控制面不需要编译：`core-bundle/node/node.exe` 是随包的 Node 运行时，
-入口就是 `core-bundle/core-host/main.js`（由 `scripts/prepare-core-bundle.mjs` 一并摆放）。
+入口就是 `core-bundle/core-host/src/main.js`（由 `scripts/prepare-core-bundle.mjs` 一并摆放）。
 
 `stdout` 在 `--stdio` 模式下是协议专用通道：`src/rpc.js` 的 `takeOverStdout()`
 会把所有非协议写入改道到 `stderr`，所以日志看 `stderr`（安装后落在

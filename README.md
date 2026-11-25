@@ -35,7 +35,7 @@
 
 ```
 dev-sidecar-lite.exe       Tauri 2 外壳（WebView2 + 原版 Vue 页面）
-  └─ node.exe              core-bundle/node/node.exe，跑 core-bundle/core-host/main.js
+  └─ node.exe              core-bundle/node/node.exe，跑 core-bundle/core-host/src/main.js
        ├─ core-bundle/bundle/core.cjs                             控制面（esbuild 打平：配置/插件/规则/PAC/证书）
        ├─ core-bundle/bundle/mitmproxy.cjs                        数据面（fork 出子进程，同样已打平）
        ├─ core-bundle/bundle/res/packages/**                      上面两份运行时读的 json/pac/脚本模板
@@ -51,7 +51,7 @@ dev-sidecar-lite.exe       Tauri 2 外壳（WebView2 + 原版 Vue 页面）
 | | Electron 版 | 本版 |
 | --- | --- | --- |
 | 外壳 | Electron 42（Chromium + Node 双份运行时） | Tauri 2（系统 WebView2） |
-| 控制面 | Electron 主进程内 | 独立进程（随包的 `node.exe` + `core-host/main.js`） |
+| 控制面 | Electron 主进程内 | 独立进程（随包的 `node.exe` + `core-host/src/main.js`） |
 | 界面通信 | `ipcRenderer.invoke('apiInvoke')` | 进程间 RPC（stdio / HTTP，见 `docs/ARCHITECTURE.md`） |
 | 状态推送 | `ipcRenderer.on('status'/'speed'/...)` | 事件流（`core-event` 再按 `channel` 分发） |
 | 系统能力 | `electron.shell` / `electron-dialog` | `tauri-plugin-opener` / `tauri-plugin-dialog` |

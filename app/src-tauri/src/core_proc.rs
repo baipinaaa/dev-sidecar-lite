@@ -1,4 +1,4 @@
-//! 控制面进程（`node.exe core-bundle/core-host/main.js --stdio`）的启停。
+//! 控制面进程（`node.exe core-bundle/core-host/src/main.js --stdio`）的启停。
 //!
 //! 为什么需要它：GUI 只是壳，所有「配置/服务/系统代理/PAC/插件」都在 core 里。
 //! 之前没有这段代码，安装后点任何按钮都只会得到「core-host 不可达」，
@@ -85,7 +85,7 @@ impl CoreProcess {
         }
 
         let Some(entry) = locate_entry() else {
-            warn!("找不到 core-bundle/core-host/main.js，控制面不会启动（界面操作都会失败）");
+            warn!("找不到 core-bundle/core-host/src/main.js，控制面不会启动（界面操作都会失败）");
             return None;
         };
         let node = locate_node();
@@ -172,17 +172,24 @@ fn locate_node() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("node"))
 }
 
-/// 控制面入口：`$INSTDIR/core-bundle/core-host/main.js`。
+/// 控制面入口：`$INSTDIR/core-bundle/core-host/src/main.js`。
 fn locate_entry() -> Option<PathBuf> {
     let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
     let candidates = [
-        exe_dir.join("core-bundle").join("core-host").join("main.js"),
+        exe_dir.join("core-bundle").join("core-host").join("src").join("main.js"),
         exe_dir
             .join("resources")
             .join("core-bundle")
             .join("core-host")
+            .join("src")
             .join("main.js"),
-        exe_dir.join("..").join("..").join("core-bundle").join("core-host").join("main.js"),
+        exe_dir
+            .join("..")
+            .join("..")
+            .join("core-bundle")
+            .join("core-host")
+            .join("src")
+            .join("main.js"),
     ];
 
     candidates.into_iter().find(|path| path.is_file())

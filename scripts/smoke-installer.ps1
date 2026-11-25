@@ -12,7 +12,7 @@
       1. 静默安装成功，`$INSTDIR` 里有 node 运行时与 core-bundle
       2. core-bundle 真的在安装目录里（`core-bundle/bundle/core.cjs`，S3 起是打平产物）
       3. `core-bundle/extra/sysproxy.exe` 存在（缺它则系统代理/PAC 全不可用）
-      4. 用**安装目录里的** node + `core-bundle/core-host/main.js --stdio` 做一次完整 RPC 冒烟：
+      4. 用**安装目录里的** node + `core-bundle/core-host/src/main.js --stdio` 做一次完整 RPC 冒烟：
          `ready` 帧 → `getApiList` → `server.start` → `HEAD /pac.js` 200 → `server.close` → `shutdown`
       5. 静默卸载，安装目录被清掉
 
@@ -82,7 +82,7 @@ $appExe = Join-Path $installDir 'DevSidecar Lite.exe'
 $bundleDir = Join-Path $installDir 'core-bundle'
 # 控制面 = 随包的 node 运行时 + core-bundle 里的 js（v0.3.0 起不再是 SEA 单文件 exe）
 $nodeExe = Join-Path $bundleDir 'node/node.exe'
-$entryJs = Join-Path $bundleDir 'core-host/main.js'
+$entryJs = Join-Path $bundleDir 'core-host/src/main.js'
 $corePkg = Join-Path $bundleDir 'bundle/core.cjs'
 $mitmproxyPkg = Join-Path $bundleDir 'bundle/mitmproxy.cjs'
 $extraDir = Join-Path $bundleDir 'extra'
@@ -192,7 +192,7 @@ try {
             $appExe = Join-Path $installDir 'DevSidecar Lite.exe'
             $bundleDir = Join-Path $installDir 'core-bundle'
             $nodeExe = Join-Path $bundleDir 'node/node.exe'
-            $entryJs = Join-Path $bundleDir 'core-host/main.js'
+            $entryJs = Join-Path $bundleDir 'core-host/src/main.js'
             $corePkg = Join-Path $bundleDir 'bundle/core.cjs'
             $mitmproxyPkg = Join-Path $bundleDir 'bundle/mitmproxy.cjs'
             $extraDir = Join-Path $bundleDir 'extra'

@@ -13,7 +13,7 @@
 └───────────────────────┬──────────────────────────────────┘
                         │ 进程间 RPC（api 名与 $api.* 一致）
 ┌───────────────────────▼──────────────────────────────────┐
-│ node.exe + bundle     Node 控制面宿主（core-bundle/core-host/main.js）│
+│ node.exe + bundle     Node 控制面宿主（core-bundle/core-host/src/main.js）│
 │  ├─ core.api         @blue-frontier/dev-sidecar（配置/插件/  │
 │  │                    规则/PAC/证书/系统代理）              │
 │  └─ localApi         补充 core 没有的 24 个接口             │
@@ -30,7 +30,7 @@
 | 进程 | 生命周期 | 崩溃影响 |
 | --- | --- | --- |
 | Tauri 壳 | 用户可见 | 界面消失，代理继续跑（数据面归 core-host 管） |
-| `node.exe core-host/main.js` | 壳启动时拉起，壳退出时 taskkill /T | 代理停摆，界面报错横幅 |
+| `node.exe core-host/src/main.js` | 壳启动时拉起，壳退出时 taskkill /T | 代理停摆，界面报错横幅 |
 | 数据面（Node） | `server.start` 时 fork，`server.close` 时 IPC 退出 | 代理停摆，core 的 `status` 变红 |
 
 ## 二、为什么控制面要独立成进程
@@ -60,7 +60,7 @@ v0.3.0 起 GUI 与核心用**管道**说话：`ds-core-host` 的 stdin/stdout �
 
 | 项目 | 值 |
 | --- | --- |
-| 传输 | Tauri 壳 `spawn(node.exe, [core-bundle/core-host/main.js, --stdio])`，stdin/stdout 收发 |
+| 传输 | Tauri 壳 `spawn(node.exe, [core-bundle/core-host/src/main.js, --stdio])`，stdin/stdout 收发 |
 | 调用 | `{"jsonrpc":"2.0","id":1,"method":"api.invoke","params":{"api":"proxy.start","param":null}}` |
 | 成功 | `{"jsonrpc":"2.0","id":1,"result":<任意 JSON>}`（裸数据，与 Electron 版回调一致） |
 | 失败 | `{"jsonrpc":"2.0","id":1,"error":{"code":"unknown_api","message":"api 接口不存在: x"}}` |

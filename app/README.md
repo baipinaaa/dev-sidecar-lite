@@ -2,7 +2,7 @@
 
 Tauri 2 + Vue 3 的展示面。**它不做代理**，只负责：
 
-- 把前端调用转发给控制面（随包的 `node.exe` 跑 `core-bundle/core-host/main.js`，Node core）
+- 把前端调用转发给控制面（随包的 `node.exe` 跑 `core-bundle/core-host/src/main.js`，Node core）
 - 读控制面的 stdout，把 `status` / `speed` / `traffic` / `log` 推给界面（`core-event`）
 - 托盘菜单与首页开关共用一套互斥逻辑（托盘只发事件 `tray-toggle`，由前端处理）
 
@@ -58,7 +58,7 @@ npm run tauri:build
 
 | 项目 | 值 |
 | --- | --- |
-| 传输 | `spawn(node.exe, ["core-bundle/core-host/main.js", "--stdio"])`，stdin/stdout 走 NDJSON |
+| 传输 | `spawn(node.exe, ["core-bundle/core-host/src/main.js", "--stdio"])`，stdin/stdout 走 NDJSON |
 | 调用 | `{"jsonrpc":"2.0","id":1,"method":"api.invoke","params":{"api":"proxy.start","param":null}}` |
 | 结果 | `{"jsonrpc":"2.0","id":1,"result":...}` / `{"jsonrpc":"2.0","id":1,"error":{"code","message"}}` |
 | 事件 | `{"jsonrpc":"2.0","method":"event","params":{"channel":"status","payload":{...}}}`，壳转成 `core-event` |
