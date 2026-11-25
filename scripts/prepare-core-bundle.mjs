@@ -192,7 +192,11 @@ function run (cmd, args, cwd) {
 
 function main () {
   const opts = parseArgs(process.argv.slice(2))
-  const litePkgPath = path.join(liteRoot, 'core-host', 'package.json')
+  // 版本号只认 app/package.json（与 tauri.conf.json、Cargo.toml 一起升级的那个），
+  // 回退到 core-host 的 package.json。core-host/package.json 以前就是这里的唯一来源，
+  // 发版时忘了同步 → 界面「关于」一直显示旧版本号。
+  const appPkgPath = path.join(liteRoot, 'app', 'package.json')
+  const litePkgPath = fs.existsSync(appPkgPath) ? appPkgPath : path.join(liteRoot, 'core-host', 'package.json')
   console.log(`[core-bundle] dev-sidecar: ${opts.devSidecar}`)
   console.log(`[core-bundle] 输出目录: ${opts.out}`)
 

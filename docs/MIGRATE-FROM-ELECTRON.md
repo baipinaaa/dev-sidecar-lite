@@ -61,7 +61,7 @@ foreach ($c in $cert) { Remove-Item -Path $c.PSPath -Force }
 | `config.json` | 用户自定义（与默认值做 diff 后保存） |
 | `remote_config.json5` | 远程配置缓存，可整份删掉让新版重新拉 |
 | `running.json` | 运行时合并结果，**不要手改**，每次启动重写 |
-| `dev-sidecar.ca.crt` / `dev-sidecar.ca.key.pem` | 根证书，换版本可以继续用同一张（**证书路径也跟着目录变，搬目录就要重新装一次证书**） |
+| `dev-sidecar.ca.crt` / `dev-sidecar.ca.key.pem` | 根证书。**两个文件一起搬**就继续用同一张，系统里已装的证书不用重装；只搬 `config.json` 不搬证书，新版会现场生成一张新的 CA，必须重新安装证书才不报错 |
 
 如果你之前在旧版里手改过 `running.json` 来绕过某个问题，**不要把它带到新版**：新版每次启动
 都会从 `config.json` + `remote_config.json5` 重新合并生成。
