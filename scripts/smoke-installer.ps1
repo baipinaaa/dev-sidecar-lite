@@ -247,7 +247,7 @@ try {
     $env:DS_DATA_DIR = $dataDir
 
     Write-Host '==> 4/6 控制面 stdio 冒烟（ready → getApiList → 数据面 → /pac.js → 关闭）'
-    $probe = Join-Path $root 'scripts/rpc-probe.mjs'
+    $probe = Join-Path $root 'scripts/rpc-probe.cjs'
     if (-not (Test-Path -LiteralPath $probe)) {
         $detail = "找不到探针脚本：$probe"
         throw $detail

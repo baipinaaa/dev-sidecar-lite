@@ -26,7 +26,7 @@ module.exports = expose
 | 端口 | 要挑 31190，可能与别的软件冲突 | 不需要 |
 | 鉴权 | token 文件 + 首次启动读写时序（曾导致 SSE 永久 401） | 不需要（管道只属于父子进程） |
 | 长连接 | SSE 会被中间件/超时打断，要自己重连 | 管道生命周期 = 进程生命周期 |
-| 调试 | `curl` 方便 | 要写脚本（已提供 `scripts/rpc-probe.mjs`） |
+| 调试 | `curl` 方便 | 要写脚本（已提供 `scripts/rpc-probe.cjs`） |
 
 所以 GUI 走管道，HTTP 保留成**调试模式**。
 
@@ -93,7 +93,7 @@ node core-host/src/main.js --port 31190 -v
 pwsh -File scripts/smoke-core-host.ps1
 
 # 只看协议本身（不经 PowerShell，直接 node）
-node scripts/rpc-probe.mjs --entry core-host/src/main.js --home .build/probe-home
+node scripts/rpc-probe.cjs --entry core-host/src/main.js --home .build/probe-home
 ```
 
 调试模式下想用 `curl`：

@@ -8,7 +8,7 @@
     `require` 的，如果打包时忘了放 core-bundle，安装包能装上、进程也能启动，
     但一进去就 MODULE_NOT_FOUND。
 
-    v0.3.0 起控制面走 stdio JSON-RPC，所以探针逻辑在 `scripts/rpc-probe.mjs` 里
+    v0.3.0 起控制面走 stdio JSON-RPC，所以探针逻辑在 `scripts/rpc-probe.cjs` 里
     （起进程 → 写帧读帧 → 断言），这个脚本只负责准备隔离环境与路径。
 
     断言链（缺一不可）：
@@ -78,7 +78,7 @@ if (-not $nodeExe) {
     throw '找不到 node（既没有 core-bundle/node/node.exe，PATH 里也没有）'
 }
 
-$probe = Join-Path $root 'scripts/rpc-probe.mjs'
+$probe = Join-Path $root 'scripts/rpc-probe.cjs'
 if (-not (Test-Path -LiteralPath $probe)) {
     throw "找不到探针脚本: $probe"
 }
