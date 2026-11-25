@@ -185,10 +185,10 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw '更新 release 说明失败' }
           } else {
             Write-Host "创建 release $tag"
-            gh release create $tag $exe `\
-              --title "DevSidecar Lite $tag" `\
-              --notes-file release-notes.md `\
-              --latest `\
+            gh release create $tag $exe `
+              --title "DevSidecar Lite $tag" `
+              --notes-file release-notes.md `
+              --latest `
               --target '${{ github.sha }}'
             if ($LASTEXITCODE -ne 0) { throw '创建 release 失败' }
           }
