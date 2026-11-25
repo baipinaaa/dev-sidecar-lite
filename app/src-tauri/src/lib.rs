@@ -206,8 +206,10 @@ fn spawn_reader(app: AppHandle, core: CoreRpc, stdout: std::process::ChildStdout
                 Some("ready") => {
                     let params = msg.get("params").cloned().unwrap_or(Value::Null);
                     info!(
-                        pid = params.get("pid").and_then(Value::as_u64).unwrap_or(0),
-                        version = params.get("version").and_then(Value::as_str).unwrap_or("未知"),
+                        // tracing 宏内部把 `Value` 解析成 `tracing::field::Value` trait，
+                        // 所以这里必须用闭包，不能写 `Value::as_u64`
+                        pid = params.get("pid").and_then(|v| v.as_u64()).unwrap_or(0),
+                        version = params.get("version").and_then(|v| v.as_str()).unwrap_or("未知"),
                         "控制面已就绪"
                     );
                     *core.ready.write().unwrap() = Some(params);
