@@ -32,7 +32,7 @@ const EXTERNALS = [
 ]
 
 function parseArgs (argv) {
-  const out = { targets: ['mitmproxy'], keepRes: false }
+  const out = { targets: ['mitmproxy'], keepRes: false, userDir: '.dev-sidecar-lite' }
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
     const next = () => argv[++i]
@@ -42,6 +42,7 @@ function parseArgs (argv) {
     else if (arg === '--targets') out.targets = next().split(',')
     else if (arg === '--core-entry') out.coreEntry = next()
     else if (arg === '--bridge-entry') out.bridgeEntry = next()
+    else if (arg === '--user-dir') out.userDir = next()
     else if (arg === '--keep-res') out.keepRes = true
     else if (arg === '--help' || arg === '-h') out.help = true
     else throw new Error(`未知参数：${arg}`)
@@ -107,7 +108,7 @@ function mirrorResources (pkgDir, pkgName, resRoot) {
  * `__dirname` / `__filename` 重写插件：只改目标包里的文件，第三方依赖保持原样
  * （它们通常不读自己的包内资源；真踩到会在冒烟里立刻暴露）。
  */
-function dirnamePlugin ({ pkgDir, pkgName, resRoot }) {
+function dirnamePlugin ({ pkgDir, pkgName, resRoot, userDir }) {
   return {
     name: 'ds-dirname-mirror',
     setup (build) {
@@ -118,7 +119,10 @@ function dirnamePlugin ({ pkgDir, pkgName, resRoot }) {
         }
         const relDir = path.relative(pkgDir, path.dirname(args.path))
         const mirror = path.posix.join('res', 'packages', pkgName, relDir.split(path.sep).join('/'))
-        const rewritten = source
+        // 用户配置目录：core 里硬编码的 `~/.dev-sidecar` 在这里一次性换成 `.dev-sidecar-lite`；
+        // 用 `(?![-.\w])` 保证幂等（已经是 `.dev-sidecar-lite` 的不会再被改）。
+        const userDirFixed = source.replace(/\.dev-sidecar(?![-.\w])/g, userDir || '.dev-sidecar-lite')
+        const rewritten = userDirFixed
           .replace(/\b__dirname\b/g, `require('node:path').join(__dirname, ${JSON.stringify(mirror)})`)
           .replace(/\b__filename\b/g, `require('node:path').join(__dirname, ${JSON.stringify(path.posix.join(mirror, path.basename(args.path)))})`)
         return { contents: rewritten, loader: 'js' }
@@ -186,7 +190,7 @@ async function main () {
       sourcemap: false,
       logLevel: 'warning',
       external: EXTERNALS,
-      plugins: [dirnamePlugin({ pkgDir: target.pkg, pkgName: target.name === 'core' ? 'dev-sidecar' : target.name, resRoot })],
+      plugins: [dirnamePlugin({ pkgDir: target.pkg, pkgName: target.name === 'core' ? 'dev-sidecar' : target.name, resRoot, userDir: opts.userDir })],
       define: { 'process.env.NODE_ENV': '"production"' },
     })
     const resCount = mirrorResources(target.pkg, target.name === 'core' ? 'dev-sidecar' : target.name, resRoot)

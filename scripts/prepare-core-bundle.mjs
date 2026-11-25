@@ -291,6 +291,7 @@ function main () {
         '--targets', 'mitmproxy,core',
         '--core-entry', path.join(liteRoot, 'core-host', 'core-entry.js'),
         '--bridge-entry', path.join(liteRoot, 'core-host', 'bridge-entry.cjs'),
+        '--user-dir', process.env.DS_USER_DIR_NAME || '.dev-sidecar-lite',
       ], liteRoot)
       bundled = true
     }
