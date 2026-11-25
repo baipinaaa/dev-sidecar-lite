@@ -1,13 +1,13 @@
 name: ci
 
-# 三条流水线之一（ci / installers / release）。
+# 两条流水线之一（ci / release）。
 #
-# ci 只做「不产出安装包」的检查：Rust 静态检查与单测、前端构建、core-host 端到端冒烟。
-# 产包见 installers.yml，发版见 release.yml。
+# ci 只做「不产出安装包」的检查：前端构建、core-host 端到端冒烟。
+# 发版见 release.yml。
 #
 # 为什么把 core-host 冒烟放进 CI：0.1.0 的教训是「编译全绿、装完不能用」——
-# Rust 侧 117 个单测全部通过，但控制面没把用户配置合并进来、数据面 bridge 找不到 mitmproxy，
-# 这些问题只有跑起来才看得见。这里用 `-NodeEntry` 模式跑（不需要 SEA），
+# 控制面没把用户配置合并进来、数据面 bridge 找不到 mitmproxy，
+# 这些问题只有跑起来才看得见。这里用 `-NodeEntry` 模式跑（不需要预先打包），
 # 断言链：/healthz → getApiList → server.start → HEAD /pac.js 200 → server.close。
 
 on:
@@ -17,8 +17,6 @@ on:
   workflow_dispatch:
 
 env:
-  CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
   CORE_BUNDLE_MAX_MB: '70'
 
 concurrency:
@@ -26,41 +24,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # ---------------------------------------------------------------------------
-  # Rust 数据面（路线 4 里是「实验通道」，但代码仍在仓库里，必须保持可编译、单测通过）
-  # ---------------------------------------------------------------------------
-  rust:
-    runs-on: windows-latest
-    timeout-minutes: 40
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: '. -> target'
-
-      - name: rustfmt 检查（不阻断，差异直接打日志）
-        shell: pwsh
-        run: |
-          cargo fmt --all -- --check
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host '::warning::存在未格式化的代码，下面是 cargo fmt 的差异（本地执行 cargo fmt --all 即可修好）'
-            cargo fmt --all
-            git --no-pager diff --stat
-            git --no-pager diff
-          }
-          exit 0
-
-      - name: clippy（-D warnings）
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: cargo test
-        run: cargo test --workspace
-
   # ---------------------------------------------------------------------------
   # 前端（移植过来的原版 view/**）
   # ---------------------------------------------------------------------------

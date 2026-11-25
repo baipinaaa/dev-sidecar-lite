@@ -169,35 +169,23 @@ function createHost (options) {
     if (options.engineControl) {
       return options.engineControl.status()
     }
-    const engine = typeof api.server.getEngine === 'function' ? api.server.getEngine() : 'node'
-    let configured = 'auto'
-    try {
-      const conf = api.config.get()
-      configured = (conf.proxy && conf.proxy.engine) || 'auto'
-    } catch (e) {
-      // 配置读不到就只报运行时引擎
-    }
-    return { engine, configured, running: api.status.get().server.enabled === true }
+    return { engine: 'node', running: api.status.get().server.enabled === true }
   }
 
   const handleInvoke = async (body) => {
     const apiName = body && body.api
     const param = body ? body.param : null
 
-    // 三个本地增强接口：Rust 侧需要，Node core 里没有
+    // 本地增强接口：core 里没有，由 core-host 提供
     if (apiName === 'engine.status') {
       return engineStatus()
     }
     if (apiName === 'engine.set') {
-      const engine = param && param.engine
-      if (engine !== 'rust' && engine !== 'node' && engine !== 'auto') {
-        throw new ApiError(`未知引擎: ${engine}`, 'invalid_engine')
-      }
+      // 只有一种引擎，保留接口形状但不接受切换（旧前端 / 旧配置仍能调通）
       if (options.engineControl) {
-        await options.engineControl.set(engine)
+        await options.engineControl.set(param && param.engine)
         return engineStatus()
       }
-      api.config.update({ proxy: { engine } })
       return engineStatus()
     }
     if (apiName === 'api.list') {

@@ -10,7 +10,7 @@
     这个脚本只做「装完之后到底能不能跑」这一件事，任何一个环节不通就 exit 1。
 
     断言链：
-      1. 静默安装成功，`$INSTDIR` 里 exe 齐全（ds-core-host.exe / ds-proxy.exe）
+      1. 静默安装成功，`$INSTDIR` 里 exe 齐全（ds-core-host.exe）
       2. core-bundle 真的在安装目录里（`core-bundle/node_modules/@blue-frontier/dev-sidecar`）
       3. `core-bundle/extra/sysproxy.exe` 存在（缺它则系统代理/PAC 全不可用）
       4. 用**安装目录里的** ds-core-host.exe 起控制面：`/healthz` 正常
@@ -83,7 +83,6 @@ if (-not $isAdmin) {
 $installDir = Join-Path $env:ProgramFiles 'DevSidecar Lite'
 $appExe = Join-Path $installDir 'DevSidecar Lite.exe'
 $coreHostExe = Join-Path $installDir 'ds-core-host.exe'
-$proxyExe = Join-Path $installDir 'ds-proxy.exe'
 $bundleDir = Join-Path $installDir 'core-bundle'
 $corePkg = Join-Path $bundleDir 'node_modules/@blue-frontier/dev-sidecar'
 $mitmproxyPkg = Join-Path $bundleDir 'node_modules/@blue-frontier/mitmproxy'
@@ -193,8 +192,7 @@ try {
             $installDir = $alt.FullName
             $appExe = Join-Path $installDir 'DevSidecar Lite.exe'
             $coreHostExe = Join-Path $installDir 'ds-core-host.exe'
-            $proxyExe = Join-Path $installDir 'ds-proxy.exe'
-            $bundleDir = Join-Path $installDir 'core-bundle'
+                        $bundleDir = Join-Path $installDir 'core-bundle'
             $corePkg = Join-Path $bundleDir 'node_modules/@blue-frontier/dev-sidecar'
             $mitmproxyPkg = Join-Path $bundleDir 'node_modules/@blue-frontier/mitmproxy'
             $extraDir = Join-Path $bundleDir 'extra'
@@ -204,7 +202,7 @@ try {
         }
     }
     $mainExe = Get-ChildItem $installDir -Filter '*.exe' -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -notin @('ds-proxy.exe', 'ds-core-host.exe', 'uninstall.exe') } |
+        Where-Object { $_.Name -notin @('ds-core-host.exe', 'uninstall.exe') } |
         Select-Object -First 1
     if ($mainExe) {
         $appExe = $mainExe.FullName
@@ -215,10 +213,6 @@ try {
     Write-Host "    安装完成（主程序：$(if ($appExe) { $appExe } else { '未找到' })）"
 
     Write-Host '==> 2/8 校验安装布局'
-    if (-not (Test-Path $proxyExe)) {
-        $detail = "缺少 $proxyExe（prepare-binaries.ps1 没把 Rust 产物放进来）"
-        throw $detail
-    }
     if (-not (Test-Path (Join-Path $corePkg 'package.json'))) {
         $detail = "缺少 core：$corePkg（打包步骤没跑 prepare-core-bundle）"
         throw $detail

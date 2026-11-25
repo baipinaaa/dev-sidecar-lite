@@ -1,145 +1,117 @@
 # 架构
 
-## 一、三个进程，各管一件事
+本文描述 **v0.3.0** 的进程模型与模块边界。
+
+一句话：**外壳换掉（Electron → Tauri 2），控制面与数据面原样沿用 Node 版**。
+
+## 一、进程拓扑
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│ dev-sidecar-lite.exe（Tauri 2 壳，Rust + WebView2）           │
-│  · 只做桥接：invoke('api_invoke') → HTTP → core-host          │
-│  · 只做表面：首页开关矩阵、九个子页、托盘菜单                  │
-└───────────────┬──────────────────────────────┬───────────────┘
-                │ POST /invoke                 │ GET /events (SSE)
-                │ Bearer token                 │
-┌───────────────▼──────────────────────────────▼───────────────┐
-│ ds-core-host.exe（Node，SEA 打包）                            │
-│  · 加载 core.api（配置、插件、系统代理、PAC 编排）             │
-│  · 不碰数据：数据面由 core 自己拉起                            │
-└───────────────┬──────────────────────────────────────────────┘
-                │ spawn（stdin 控制 / stdout 状态 / stderr 日志）
-┌───────────────▼──────────────────────────────────────────────┐
-│ ds-proxy.exe（Rust，tokio）                                   │
-│  · CONNECT 隧道、MITM 解密、直连转发                           │
-│  · DNS 取址（DoH/DoT）、IP 评分、ECH、证书签发                │
-│  · /pac.js 由同一进程提供                                      │
-└──────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│ dev-sidecar-lite.exe        Tauri 2 壳（系统 WebView2）    │
+│  └─ 原版 Vue 页面（app/src/view/**，从 packages/gui 移植） │
+└───────────────────────┬──────────────────────────────────┘
+                        │ 进程间 RPC（api 名与 $api.* 一致）
+┌───────────────────────▼──────────────────────────────────┐
+│ ds-core-host.exe      Node 控制面宿主                      │
+│  ├─ core.api         @blue-frontier/dev-sidecar（配置/插件/  │
+│  │                    规则/PAC/证书/系统代理）              │
+│  └─ localApi         补充 core 没有的 24 个接口             │
+└───────────────────────┬──────────────────────────────────┘
+                        │ fork(mitmproxyPath, [running.json]) + IPC
+┌───────────────────────▼──────────────────────────────────┐
+│ Node 数据面           @blue-frontier/mitmproxy             │
+│  └─ 代理监听 127.0.0.1:31181（CONNECT / MITM / PAC）        │
+└──────────────────────────────────────────────────────────┘
 ```
 
-为什么不是两个进程：UI 需要一个**稳定**的控制面，而数据面会崩、会被杀、会重启。把
-"配置与状态"留在 Node 里（原样复用），把"字节搬运"放进 Rust，两者通过 `running.json`
-（启动参数）与 NDJSON（运行时控制）解耦，任何一边都能单独重启。
+三个进程各自的职责：
 
-### 引擎切换不改 Node 源码
-
-core 的 `server.start({ mitmproxyPath })` 已经把"拿哪个子进程当数据面"参数化。所以换引擎只需要
-换入口，而不是改 core：
-
-```
-engine=node → mitmproxyPath = @blue-frontier/mitmproxy   （原样）
-engine=rust → mitmproxyPath = core-host/shim/rust-engine.js
-                                └─ spawn ds-proxy.exe，桥接 IPC ↔ stdin/stdout
-```
-
-垫片不碰数据流（字节全在 ds-proxy 里），只转发控制消息与状态；core 那边看到的仍是一个正常的
-`fork` 子进程，`close` 依旧是发 IPC 消息。代价是多一个极轻的 Node 进程，好处是
-**旧仓库零改动**，回退只需把 `proxy.engine` 改回 `node`。
-
-## 二、一次请求经过什么
-
-### 2.1 CONNECT（HTTPS）
-
-```
-浏览器 ──CONNECT steamcommunity.com:443──▶ ds-proxy
-                                         │
-                     ┌───────────────────┴────────────────────┐
-                     │ 1. 解析请求头（http::read_head，保留 leftover）
-                     │ 2. guard::bypass_reason：白名单 / excludeIpList / 内网 → 纯隧道
-                     │ 3. rules::should_intercept(host)？
-                     │      ├─ 否 → tunnel：200 + copy_bidirectional
-                     │      └─ 是 → MITM
-                     │ 4. dns::select：候选 IP 排序（EWMA × 失败惩罚 − 拒绝记忆）
-                     │ 5. 逐个 try：TCP → (指纹通道? BoringSSL(Chrome) : rustls(ECH? with_ech : 普通)) → HTTP/1.1
-                     │ 6. 回 200，把 leftover 回灌给 TLS acceptor（PrefixedStream）
-                     └────────────────────────────────────────┘
-```
-
-关键点：
-
-- **leftover 必须保留**。浏览器把 CONNECT 与 ClientHello 放在同一个 TCP 段里是常态，丢掉它就会
-  出现"200 已回、握手永远等不到"的经典死锁——Electron 版在 `tls-fragment` 重构里踩过一次。
-- **MITM 边界在 `should_intercept`**，不在 TLS 层。没命中规则的域名一个字节都不解密。
-- **失败要分类**（`ds_dns::failure::FailureReason`）：`TcpTimeout` 记在 IP 头上，
-  `SniRejected` 记在域名头上，`Misdirected(421)` 记在"域名+路由"上。混在一起记会让好 IP
-  被域名级问题连坐。
-
-### 2.2 明文 HTTP
-
-`http::forward` 把绝对 URI 改成 origin-form 再发上游；不做 MITM（本来就可读），
-但仍会经过 `apply_request/apply_response` 做头改写（例如删 `alt-svc` 阻断 QUIC）。
-
-## 三、配置的流向
-
-```
-~/.dev-sidecar/config.json（用户差异）
-        +  remote_config.json5（远程缓存，可选）
-        +  内置默认（ds_types 不负责，仍由 Node core 提供）
-        ↓  Node core 合并
-running.json（扁平结构，一次启动一份）
-        ↓  --config
-ds-proxy 用 ds_types::RuntimeConfig 反序列化
-```
-
-`RuntimeConfig` 的设计约定：
-
-- 每个子结构都 `#[serde(rename_all = "camelCase", default)]`，缺字段一律取默认值——**配置比代码
-  老**是常态，不能让一个没见过的键把整个代理打挂。
-- 每个子结构都有 `#[serde(flatten)] extra: JsonMap`，未知键原样保留（将来要写回时不丢）。
-- 布尔值用 `FlexBool`：Node 版历史上把 `"true"`、`1`、`null` 都当布尔用，直接 `bool` 会解不动。
-- 域名通配（`*.x.com`）与正则（`^(.+.)?x.com$`）混合出现在同一个 map 的 key 里，
-  `matcher::compile` 负责判别并编译，结果按容量 4096 的 LRU 缓存。
-
-## 四、事件与控制
-
-| 方向 | 通道 | 载荷 |
+| 进程 | 生命周期 | 崩溃影响 |
 | --- | --- | --- |
-| ds-proxy → core | stdout NDJSON | `{"id":n,"ok":true,"data":…}` 控制响应；`{"type":"status","value":…}` 状态 |
-| core → core-host | `event.fire`（被宿主包了一层） | `status` / `speed` / `traffic` / `error` / `log` |
-| core-host → UI | SSE `/events` | 同上，事件名即频道名 |
-| UI → core-host | `POST /invoke` | `{api, param}`，`api` 与 Electron 版 `$api.xxx` 同名 |
-| UI → ds-proxy | 经 `api.server.*` 间接控制 | 关闭走 `{cmd:"shutdown"}` 写 stdin |
+| Tauri 壳 | 用户可见 | 界面消失，代理继续跑（数据面归 core-host 管） |
+| `ds-core-host.exe` | 壳启动时拉起，壳退出时 taskkill /T | 代理停摆，界面报错横幅 |
+| 数据面（Node） | `server.start` 时 fork，`server.close` 时 IPC 退出 | 代理停摆，core 的 `status` 变红 |
 
-为什么要包一层 `event.fire`：core 的 `event` 是个极简发布订阅（`register/fire/unregister`），
-没有"旁路观察"能力。宿主启动时替换 `api.event.fire`，原实现照常执行，顺带广播给 SSE 订阅者——
-这样不用改 core 的 20 多处 `fire` 调用点。
+## 二、为什么控制面要独立成进程
 
-日志同理：core 的 `log` 是单例，包 `info/warn/error/debug` 四个方法即可。
+原版把控制面放在 Electron 主进程里。换成 Tauri 后主进程是 Rust，而控制面是 6 万行 Node 代码
+（含 135 条拦截规则、插件体系、证书安装、系统代理操作），用 Rust 重写等于重做一个项目。
 
-## 五、几个刻意的取舍
+所以控制面留在 Node，装成一个独立进程，Tauri 只做「窗口 + 托盘 + 转发」。
 
-| 决策 | 备选 | 为什么这么选 |
+代价是**必须跨进程**，于是有三个必须守住的约定：
+
+1. **控制面必须在监听前把 token 写到磁盘**，否则壳的第一次调用会 401（0.2.0 的「点按钮没反应」就是这么来的：
+   `CoreClient` 在应用启动瞬间读 token，那时 core-host 还没起来）。
+2. **`fork` 的脚本入口必须是 Node 能直接执行的 `.cjs`/`.js`**。若控制面被打成单文件 exe（SEA），
+   `fork()` 默认复用 `process.execPath`，会「再跑一遍自己」，必须改写成显式 `spawn + --mitmproxy-bridge`（见 `core-host/src/fork-shim.js`）。
+3. **`require('@blue-frontier/*')` 必须能落到磁盘上的包目录**。SEA 的 `require` 只认内置模块，
+   于是 core-host 里所有第三方依赖都得走 `packageRequire()`（`module.createRequire(<core>/package.json)`）。
+
+第 2、3 条都是 SEA 带来的，所以 0.3.0 会把控制面从 SEA 改成「普通 node + 单文件 `bundle.cjs`」，
+届时 `fork-shim.js` 与 `packageRequire()` 都可以删掉（见 `plans/v030-arch.md` 的 S1）。
+
+## 三、控制面协议
+
+| 项目 | 值 |
+| --- | --- |
+| 地址 | `http://127.0.0.1:31190`（只绑回环；`DS_CORE_PORT` 可覆盖） |
+| 凭据 | `<dataDir>/run/core.token`（48 hex，权限 0600），请求头 `Authorization: Bearer <token>` |
+| 免鉴权 | 只有 `GET /healthz` |
+| 调用 | `POST /invoke`，body `{ "api": "proxy.start", "param": null }`；成功返回**裸数据**，失败返回 `{ok:false,error,code}` |
+| 事件 | `GET /events`，SSE，帧格式 `event: <channel>` + `data: <json>` |
+| 事件通道 | `status` / `speed` / `traffic` / `error` / `log` / `config.changed` |
+
+`api` 名字与 Electron 版的 `$api.xxx` 完全一致，所以 `packages/gui` 的页面可以逐页对照移植。
+
+SSE 会先经 Tauri 侧 `stream_events()` 转成 `core-event`（payload `{channel, payload}`）再交给前端，
+原因是 Tauri 的事件名不接受点号，`config.changed` 这类名字会被静默丢弃。
+
+## 四、数据面如何被拉起
+
+```
+core.api.server.start({ mitmproxyPath, setting })
+  → fork(core-bundle/core-host/mitmproxy-bridge.cjs, [<dataDir>/running.json])
+      → bridge 读 running.json，注入 config.setting.rootDir = dirname(DS_EXTRA_PATH)
+      → require('@blue-frontier/mitmproxy').start(config)
+          → 监听 127.0.0.1:<server.port>（默认 31181）
+```
+
+三个容易踩的点：
+
+- `running.json` 里值为 `null` 的表项表示**关掉这条内置规则**（core 就是这么关 git 的油猴脚本的），
+  而 mitmproxy 的规则构建不判空，必须由 bridge 先剔除（`dropNullIntercepts`）。
+- `config.setting.rootDir` 不给的话，mitmproxy 会用 `undefined/scripts` 拼脚本目录。
+- 数据面停止只能通过 IPC（`{type:'action',event:{key:'close'}}`），不是杀进程。
+
+## 五、配置与数据目录
+
+| 内容 | 位置 |
+| --- | --- |
+| 用户配置 | `C:\Users\<你>\.dev-sidecar-lite\config.json`（`config.json5` 兼容） |
+| 根证书 | 同目录 `dev-sidecar.ca.crt` / `dev-sidecar.ca.key` |
+| 日志 | 同目录 `log\`；控制面自身日志在 `%ProgramData%\dev-sidecar-lite\log\core-host.log` |
+| 运行时 | `%ProgramData%\dev-sidecar-lite\{run\core.token, running.json}` |
+
+core 内部把 `~/.dev-sidecar` 写死在十几个位置，本项目不改上游代码，而是在加载时对
+`@blue-frontier/**` 的源码做一次字面量替换（`core-host/src/runtime.js` 的 `installUserDir()`），
+把目录名换成 `.dev-sidecar-lite`。这是唯一一处「运行时改上游源码」的地方，改动范围仅限字符串。
+
+## 六、打包分层
+
+| 层 | 内容 | 说明 |
 | --- | --- | --- |
-| 手写 MITM，不用 hudsucker | hudsucker 0.25 | 依赖的 hyper 版本与我们锁定的不一致；手写 300 行可控，出问题好定位 |
-| `ds-types` 全字段 + flatten | 只解需要的字段 | 配置要能原样写回，且新键不能崩 |
-| 保留 Node 控制面 | 全部 Rust | 34k 行插件/规则语义重写风险远大于收益 |
-| PAC 在 Rust 侧生成 | 继续 Node 生成 | PAC 与规则同源，减少一次跨进程数据搬运；且启动即可用 |
-| 引擎默认 `auto` | 直接 `rust` | 找不到 `ds-proxy.exe` 时自动回退，安装包残缺也能启动 |
-| 只监听回环 | 监听 0.0.0.0 | 这两个进程能改系统代理、装证书，暴露到局域网等于开后门 |
+| L1 单文件 | 控制面 `bundle.cjs` | esbuild 打成单文件，只有这份是「代码」 |
+| L2 打平 | `core-bundle/node_modules` | 用 pnpm `node-linker=hoisted` 产真实文件树（不能用符号链接，NSIS 会丢） |
+| L3 保留 | `core-bundle/extra`、`*.node` 原生模块 | 原生模块不能打平，`extra` 里有 exe 与脚本 |
 
-## 六、与 Node 版的差异（行为上）
+`core-bundle` 体积门禁 70 MB（当前 33 MB），文件数以「尽力而为」为目标（当前 3.6k，
+原版 Electron 版靠 asar 压到 133 个文件）。
 
-| 场景 | Node 版 | Lite |
-| --- | --- | --- |
-| ECH | 自写 TLS1.3（无 H2、无 GREASE、ALPN 空） | rustls 原生 ECH，ALPN 可协商 h2 |
-| 指纹 | 伪装 `sni` + 自拼 ClientHello（与 Chrome 差 7 个维度） | 双通道：默认 rustls；`fingerprint:"chrome"` 走 BoringSSL，JA4 对齐 `t13d1517h2_` |
-| 取址 | 预置 IP + 动态上游 + 单值串行切换 | 预置 IP + 动态上游 + EWMA 排序 + 并行拨号 |
-| 失败记忆 | 域名级 successRate，30 秒拉黑 | IP 级失败计数 + 域名级 SNI 拒绝 + 路由级 421/403，各自 TTL |
-| 并发 | 单进程事件循环 | tokio 多线程，每连接一个任务 |
-| 配置热更新 | 重启整个 Electron 界面 | 重启 `ds-proxy` 子进程（UI 与 core 不动） |
-| 托盘 | Electron | Tauri，逻辑与首页共用（托盘只发事件） |
+## 七、已知边界
 
-## 七、还没做的
-
-1. **指纹伪装**：`docs/FINGERPRINT.md` 的路线 B（BoringSSL / wreq）尚未接入。
-2. **HTTP/2 上游**：`mitm.rs` 目前只做 HTTP/1.1，h2 站点会退化为直连隧道。
-3. **QUIC 阻断**：只删 `alt-svc` 响应头，没有 UDP 层拦截（S302 用 WFP 驱动做这件事）。
-4. **插件**（git/node/pip/xget/free-eye）：仍只在 Node 侧存在，UI 能看到开关，但 Rust 数据面不参与。
-5. **编译验证**：见 README 的状态表。
+- **Windows x64 only**：`sysproxy.exe`、`EnableLoopback.exe`、NSIS 都是 Windows 专用
+- **不做锁区/年龄门绕过**：那套方案依赖作者服务器中转，不在本项目范围
+- **网页诊断不内建 CDP**：Tauri 里起独立浏览器实例代价太大，改成「系统浏览器 + 复制代理地址」
+- **没有自动更新**：换版本手动下载覆盖安装

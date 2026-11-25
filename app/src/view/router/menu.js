@@ -16,8 +16,6 @@ export default function createMenus (app) {
     { title: 'GitHub状态监控', path: '/github-status', icon: 'line-chart' },
     { title: '设置', path: '/setting', icon: 'setting' },
     { title: '帮助中心', path: '/help', icon: 'star' },
-    // 实验功能：Rust 数据面等非默认能力，默认关闭
-    { title: '实验功能', path: '/lab', icon: 'experiment' },
     { title: '应用', path: '/plugin', icon: 'appstore', children: plugins },
   ]
   return menus

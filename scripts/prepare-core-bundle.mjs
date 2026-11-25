@@ -328,9 +328,8 @@ function main () {
       }
     }
 
-    // 5) core-host（src + shim，SEA 需要它们在磁盘上）
+    // 5) core-host（src，SEA 需要它们在磁盘上；数据面入口是 mitmproxy-bridge.cjs）
     copyTree(path.join(liteRoot, 'core-host', 'src'), path.join(opts.out, 'core-host', 'src'))
-    copyTree(path.join(liteRoot, 'core-host', 'shim'), path.join(opts.out, 'core-host', 'shim'))
     // Node 数据面入口：core 会 `fork(<这个文件>, [running.json])`
     fs.copyFileSync(
       path.join(liteRoot, 'core-host', 'mitmproxy-bridge.cjs'),

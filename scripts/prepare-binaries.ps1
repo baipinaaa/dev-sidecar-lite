@@ -1,12 +1,13 @@
-# 把数据面/控制面二进制放进 Tauri 的 sidecar 目录
+# 把控制面二进制放进 Tauri 的 sidecar 目录
 #
 # Tauri 的 externalBin 要求文件名带目标三元组后缀：
-#   binaries/ds-proxy-x86_64-pc-windows-msvc.exe
 #   binaries/ds-core-host-x86_64-pc-windows-msvc.exe
+#
+# 数据面不需要 sidecar：它是 Node 的 `@blue-frontier/mitmproxy`，由 core-host fork 出来。
 #
 # 用法：
 #   pwsh -File scripts/prepare-binaries.ps1            # 默认 release（缺文件只警告，供本地开发）
-#   pwsh -File scripts/prepare-binaries.ps1 -Strict    # CI 用：缺任何一个二进制就失败
+#   pwsh -File scripts/prepare-binaries.ps1 -Strict    # CI 用：缺二进制就失败
 #   pwsh -File scripts/prepare-binaries.ps1 -Profile debug
 
 param(
@@ -41,13 +42,11 @@ function Copy-Sidecar {
     Write-Host "[ ok ] $Name -> $dest ($size KB)" -ForegroundColor Green
 }
 
-$targetDir = if ($Profile -eq 'release') { 'release' } else { 'debug' }
-Copy-Sidecar -Name 'ds-proxy' -Source (Join-Path $root "target/$targetDir/ds-proxy.exe")
 Copy-Sidecar -Name 'ds-core-host' -Source (Join-Path $root "core-host/dist/ds-core-host.exe")
 
 if ($Strict) {
     $missing = @()
-    foreach ($name in @('ds-proxy', 'ds-core-host')) {
+    foreach ($name in @('ds-core-host')) {
         $path = Join-Path $destDir "$name-$triple.exe"
         if (-not (Test-Path $path)) { $missing += $name }
     }

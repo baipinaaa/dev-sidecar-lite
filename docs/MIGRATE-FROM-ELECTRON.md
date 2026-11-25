@@ -84,6 +84,6 @@ reg query "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings" /v 
 `Cert:\CurrentUser\Root` 里出现多个同 Subject 的证书时，删掉除最新一张以外的全部，然后重启新版，
 在「代理」页重新导出/安装一次。
 
-**Q：怎么切回 Node 引擎？**
-新版默认 `proxy.engine: "auto"`（找得到 `ds-proxy.exe` 就用 Rust）。出问题时在「设置」页把引擎改成
-`node`，或在 `config.json` 里写 `"proxy": { "engine": "node" }`，重启代理服务即可。
+**Q：`proxy.engine` 还有用吗？**
+没有。v0.3.0 起只有一个数据面（Node 的 `@blue-frontier/mitmproxy`），配置里残留的
+`"engine": "rust"` 会被忽略，不需要改。

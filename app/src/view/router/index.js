@@ -12,7 +12,6 @@ import Setting from '../pages/setting'
 import Help from '../pages/help'
 import Traffic from '../pages/traffic.vue'
 import GithubStatus from '../pages/github-status.vue'
-import Lab from '../pages/lab.vue'
 
 const routes = [
   { path: '/', redirect: '/index' },
@@ -24,7 +23,6 @@ const routes = [
   { path: '/help', component: Help },
   { path: '/traffic', component: Traffic },
   { path: '/github-status', component: GithubStatus },
-  { path: '/lab', component: Lab },
   { path: '/plugin/node', component: Node },
   { path: '/plugin/git', component: Git },
   { path: '/plugin/pip', component: Pip },

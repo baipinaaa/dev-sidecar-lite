@@ -1,9 +1,0 @@
-[package]
-name = "fingerprint-probe"
-version = "0.0.1"
-edition = "2021"
-publish = false
-
-# 只用于 B1 可行性探针（见 docs/FINGERPRINT-B1.md），不属于 workspace。
-[dependencies]
-boring = "5"

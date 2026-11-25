@@ -14,15 +14,13 @@ app/
 ├─ package.json
 ├─ vite.config.js          # 固定 127.0.0.1:5273
 ├─ src/
-│  ├─ api.js               # invoke 封装 + 非 Tauri 环境的 mock
-│  ├─ store.js             # pinia：配置 / 状态 / 开关互斥
-│  ├─ router.js            # 9 个页面
-│  ├─ components/SwitchCard.vue
-│  └─ views/{Home,Proxy,Server,Groups,Settings,Traffic,Plugins,Help,Github}.vue
+│  ├─ api.js               # invoke 适配层（Tauri / 浏览器 mock）+ tauriInvoke
+│  ├─ view/                # 原版 electron 版 GUI 的移植层（pages / components / router / modules）
+│  └─ main.js              # 挂载顺序：initApi → initPre → initModules → mount → startStatusStream
 └─ src-tauri/
-   ├─ src/lib.rs           # 命令：api_invoke / core_info / engine_status / set_engine / start_status_stream
+   ├─ src/lib.rs           # 命令：api_invoke / core_info / start_status_stream / legacy_check
    ├─ src/main.rs
-   ├─ tauri.conf.json      # externalBin: ds-proxy / ds-core-host
+   ├─ tauri.conf.json      # externalBin: ds-core-host
    └─ capabilities/default.json
 ```
 
@@ -43,9 +41,8 @@ npm run dev                # http://127.0.0.1:5273
 ## 构建
 
 ```powershell
-# 1) 先构建数据面与控制面
+# 1) 先构建控制面（数据面是 Node mitmproxy，随 core-bundle 下发，不需要编译）
 cd ..
-cargo build --release            # 产出 target/release/ds-proxy.exe
 cd core-host; npm ci; npm run build   # 产出 core-host/dist/ds-core-host.exe
 cd ..
 
@@ -68,7 +65,6 @@ npm run tauri:build
 | 地址 | `DS_CORE_HOST_URL`，默认 `http://127.0.0.1:31190` |
 | 凭据 | `DS_CORE_HOST_TOKEN`，或 `%ProgramData%\dev-sidecar-lite\run\core.token` |
 | 调用 | `POST /invoke`，body `{ "api": "proxy.start", "param": null }`，`Authorization: Bearer <token>` |
-| 事件 | `GET /events`，SSE，`event: status|speed|traffic|log` + `data: <json>` |
-| 引擎切换 | `POST /invoke`，body `{ "api": "engine.set", "param": { "engine": "rust" | "node" } }` |
+| 事件 | `GET /events`，SSE，`event: status|speed|traffic|log|error|config.changed` + `data: <json>` |
 
 `api` 的名称与 Electron 版的 `$api.xxx` 一致，所以前端代码可以逐页对照迁移。

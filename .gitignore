@@ -6,7 +6,6 @@ core-host/dist/
 app/src-tauri/binaries/*.exe
 app/src-tauri/gen/
 *.log
-crates/ds-types/tests/fixtures/running.json
 
 .build/
 

@@ -1,102 +1,35 @@
 'use strict'
 
 /**
- * 数据面引擎选择。
+ * 数据面引擎。
  *
- * **这里刻意不改 Node core 的一行代码**：core 的 `server.start({ mitmproxyPath })` 已经把
- * "用哪个子进程当数据面"参数化成了 `mitmproxyPath`。所以换引擎只需要给它一个**不同的入口**：
+ * v0.3.0 起只有一个数据面：`@blue-frontier/mitmproxy`（core 用 fork 拉起的 Node 子进程）。
+ * 原来的 Rust 数据面（`crates/**` + `shim/rust-engine.js` + `ds-proxy.exe`）已经删除——
+ * 它只覆盖 CONNECT 隧道与朴素 MITM，缺 DNS 取址、拦截器链、脚本注入、`/pac.js` 等能力，
+ * 留着一个半成品只会让文档、CI、UI 三处都要为它付代价。
  *
- * - `node` → 原来的 `@blue-frontier/mitmproxy`（一个 fork 出来的 Node 进程）
- * - `rust` → `shim/rust-engine.js`（一个极薄的 Node 进程，只做 IPC ↔ stdin/stdout 桥接，
- *            真正的数据面是它 spawn 的 `ds-proxy.exe`）
- *
- * 这样旧仓库保持零改动，回退只需把 `proxy.engine` 改回 `node`。
+ * core 的 `server.start({ mitmproxyPath })` 把「用哪个子进程当数据面」参数化成了
+ * `mitmproxyPath`，所以这里只需要把入口脚本交给 core。
  */
-
-const fs = require('node:fs')
-const path = require('node:path')
-
-const runtime = require('./runtime')
-
-/**
- * shim 必须**留在磁盘上**（core 会 fork 它），不能打进 SEA。
- * 打包后位于 `<安装目录>/resources/core-bundle/core-host/shim/rust-engine.js`。
- */
-function resolveShimPath () {
-  const candidates = [
-    // 之前这里写成了 `process.env.DS_resolveShimPath()`：环境变量是字符串，调用它就抛
-    // `TypeError: process.env.DS_resolveShimPath is not a function`，安装包里 rust 引擎必崩。
-    process.env.DS_SHIM_PATH,
-    ...runtime.findInResources('core-bundle', 'core-host', 'shim', 'rust-engine.js'),
-    path.join(__dirname, '..', 'shim', 'rust-engine.js'),
-  ].filter(Boolean)
-
-  for (const candidate of candidates) {
-    if (fs.existsSync(candidate)) {
-      return candidate
-    }
-  }
-  return path.join(__dirname, '..', 'shim', 'rust-engine.js')
-}
-
-/**
- * 找 `ds-proxy.exe`。
- *
- * 顺序：环境变量 → 宿主同目录（安装包/Tauri sidecar 布局）→ 仓库开发产物。
- */
-function resolveRustProxyPath () {
-  const candidates = [
-    process.env.DS_PROXY_EXE,
-    path.join(path.dirname(process.execPath), 'ds-proxy.exe'),
-    path.join(__dirname, '../../../target/release/ds-proxy.exe'),
-    path.join(__dirname, '../../../target/debug/ds-proxy.exe'),
-  ]
-
-  for (const candidate of candidates) {
-    if (candidate && fs.existsSync(candidate)) {
-      return candidate
-    }
-  }
-  return null
-}
 
 /**
  * 解析本次应该用哪个引擎。
  *
- * @param {object} options
- * @param {string} [options.configured] `proxy.engine`，取值 auto/node/rust
- * @param {string|null} [options.rustPath] 已解析的 ds-proxy.exe
- * @returns {{engine: 'node'|'rust', rustPath: string|null, reason: string}}
+ * 函数形状刻意保留（`engine.status` 仍返回 `{engine:'node'}`），避免旧前端拿到 404。
+ *
+ * @returns {{engine: 'node', reason: string}}
  */
-function resolveEngine ({ configured, rustPath }) {
-  const wanted = configured || 'node'
-  const exe = rustPath === undefined ? resolveRustProxyPath() : rustPath
-
-  if (wanted === 'node') {
-    return { engine: 'node', rustPath: null, reason: '配置指定 node' }
-  }
-  if (wanted === 'rust') {
-    if (exe) {
-      return { engine: 'rust', rustPath: exe, reason: '配置指定 rust' }
-    }
-    return { engine: 'node', rustPath: null, reason: '配置指定 rust，但未找到 ds-proxy.exe，已回退' }
-  }
-  // 路线 4 的纪律：auto 一律用 Node 数据面。Rust 只做实验通道，必须显式配置 `proxy.engine: rust`
-  // 才启用；否则即使在 dev 目录里找到了 target/release/ds-proxy.exe 也不该抢默认位置。
-  return { engine: 'node', rustPath: null, reason: '默认 node（auto）' }
+function resolveEngine () {
+  return { engine: 'node', reason: '仅支持 Node 数据面' }
 }
 
 /**
  * 给 core 的 `mitmproxyPath`。
  *
- * @param {'node'|'rust'} engine
- * @param {string|null} nodeEntry  Node 版 mitmproxy 入口
+ * @param {string|null} nodeEntry Node 版 mitmproxy 入口（core-bundle/core-host/mitmproxy-bridge.cjs）
  * @returns {string} 实际传给 core 的入口脚本
  */
-function entryFor (engine, nodeEntry) {
-  if (engine === 'rust') {
-    return resolveShimPath()
-  }
+function entryFor (nodeEntry) {
   if (!nodeEntry) {
     throw new Error('Node 引擎入口缺失：请设置 DS_MITMPROXY_PATH 或确认 core-bundle 里有 core-host/mitmproxy-bridge.cjs')
   }
@@ -104,8 +37,6 @@ function entryFor (engine, nodeEntry) {
 }
 
 module.exports = {
-  resolveShimPath,
   entryFor,
   resolveEngine,
-  resolveRustProxyPath,
 }

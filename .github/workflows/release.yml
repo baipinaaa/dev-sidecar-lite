@@ -2,11 +2,10 @@ name: release
 
 # 打 tag 时构建并发布 Windows 安装包（NSIS）。
 #
-# 安装包里必须同时有四个东西，少一个装完就是空壳：
-#   1. ds-proxy.exe         Rust 数据面（实验通道，engine=rust 时才用）
-#   2. ds-core-host.exe     Node SEA 打包的控制面宿主
-#   3. core-bundle/         Node core + mitmproxy + extra（运行时才 require，SEA 打不进去）
-#   4. app/web 前端产物     由 tauri-action 内构建
+# 安装包里必须同时有三个东西，少一个装完就是空壳：
+#   1. ds-core-host.exe     Node SEA 打包的控制面宿主（数据面 mitmproxy 由它 fork）
+#   2. core-bundle/         Node core + mitmproxy + extra（运行时才 require，SEA 打不进去）
+#   3. app/web 前端产物     由 tauri-action 内构建
 #
 # 这里刻意把「组装 core-bundle」和「构建 exe」放在**同一个 step** 里：
 # GitHub runner 在 step 边界会杀后台进程，分开写迟早踩到（上一版就是分开放的，
@@ -56,17 +55,6 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v4
 
-      - name: 安装 Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-msvc
-          components: rustfmt, clippy
-
-      - name: 缓存 cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: '. -> target'
-
       - name: 安装 Node
         uses: actions/setup-node@v4
         with:
@@ -101,9 +89,7 @@ jobs:
           node scripts/prepare-core-bundle.mjs --dev-sidecar core-src --max-mb $env:CORE_BUNDLE_MAX_MB
           if ($LASTEXITCODE -ne 0) { throw 'core-bundle 组装/自检失败' }
 
-          Write-Host '== 4/5 构建 Rust 数据面与控制面'
-          cargo build --release --workspace
-          if ($LASTEXITCODE -ne 0) { throw 'cargo build 失败' }
+          Write-Host '== 4/5 构建控制面（Node SEA）'
           npm install -g postject --no-audit --no-fund
           node core-host/scripts/build-sea.js
           if ($LASTEXITCODE -ne 0) { throw 'Node SEA 构建失败' }
@@ -171,7 +157,7 @@ jobs:
           - 从 Electron 版迁移请先卸载旧版，两者会争抢 127.0.0.1:31181
 
           ### 说明
-          - 默认数据面是 Node（与原版一致），Rust 数据面是实验通道（设置里把 proxy.engine 改成 rust）
+          - 数据面是 Node（与 Electron 版同源），安装完点开关即可生效
           - 日志在 `%ProgramData%\\dev-sidecar-lite\\log\\core-host.log`
           - 配置目录在 `C:\\Users\\<你>\\.dev-sidecar-lite`（与原版的 `~/.dev-sidecar` 分开，两者可共存）
           "@ | Set-Content -Path release-notes.md -Encoding utf8

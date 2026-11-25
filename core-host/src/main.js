@@ -4,7 +4,7 @@
  * `ds-core-host` 入口。
  *
  * 职责：加载 Node core（控制面），起 HTTP/SSE 宿主，然后把「服务/系统代理/PAC/插件」
- * 按用户配置恢复到上次的状态。数据面由 core 自己拉起（Node 或 Rust）。
+ * 按用户配置恢复到上次的状态。数据面由 core 自己 fork 拉起（Node mitmproxy）。
  *
  * 用法：
  *   node src/main.js [--port 31190] [--host 127.0.0.1] [--data-dir <dir>] [--no-startup] [-v]
@@ -15,7 +15,7 @@ const path = require('node:path')
 
 const { createHost, resolveDataDir } = require('./host')
 const { createLocalApi } = require('./local-api')
-const { entryFor, resolveEngine, resolveRustProxyPath } = require('./engine')
+const { entryFor, resolveEngine } = require('./engine')
 const { installForkShim, BRIDGE_FLAG } = require('./fork-shim')
 const runtime = require('./runtime')
 
@@ -73,8 +73,7 @@ function printUsage () {
 环境变量:
   DS_CORE_BUNDLE      指定 core-bundle 根目录（默认按安装布局解析）
   DS_CORE_PATH        指定 core 包目录（默认自动解析）
-  DS_MITMPROXY_PATH   指定 mitmproxy 入口（Node 引擎用）
-  DS_PROXY_EXE        指定 ds-proxy.exe（Rust 引擎用）
+  DS_MITMPROXY_PATH   指定 mitmproxy 入口
 `)
 }
 
@@ -312,50 +311,31 @@ async function main () {
   })
 
   /**
-   * 引擎控制。
+   * 引擎信息。
    *
-   * 关键点：**不修改 Node core**。core 的 `server.start({ mitmproxyPath })` 已经把入口参数化，
-   * 换引擎只需给它一个不同的入口脚本（rust 模式给 shim）。
+   * v0.3.0 起只有 Node 数据面，这里保留 `engine.status` 的形状（`{engine:'node'}`）
+   * 只是为了不让旧前端拿到 404；`engine.set` 仍接受但什么也不改。
    */
   const engineControl = {
-    current: { engine: 'node', configured: 'auto', reason: '' },
+    current: resolveEngine(),
     entry: null,
     resolve () {
-      let configured = 'node'
-      try {
-        const conf = core.api.config.get()
-        configured = (conf.proxy && conf.proxy.engine) || 'node'
-      } catch (e) {
-        // 配置未就绪时按默认 node 处理
-      }
-      const resolved = resolveEngine({ configured })
-      this.current = {
-        engine: resolved.engine,
-        configured,
-        reason: resolved.reason,
-        rustPath: resolved.rustPath,
-      }
-      this.entry = entryFor(resolved.engine, nodeEntry)
+      this.current = resolveEngine()
+      this.entry = entryFor(nodeEntry)
       return this.current
     },
     status () {
       const running = core.api.status.get().server.enabled === true
-      return { ...this.current, running, rustPath: this.current.rustPath || resolveRustProxyPath() }
+      return { engine: 'node', running, rustPath: null, reason: this.current.reason }
     },
-    async set (engine) {
-      core.api.config.update({ proxy: { engine } })
-      const next = this.resolve()
-      console.log(`[core-host] 引擎已切到 ${next.engine}（${next.reason}）`)
-      if (core.api.status.get().server.enabled) {
-        const conf = core.api.config.get()
-        await core.api.server.restart({ mitmproxyPath: this.entry, setting: conf.server.setting })
-      }
+    async set () {
+      // 只有一种引擎，切换请求直接返回当前状态（不再写 config.proxy.engine）。
       return this.status()
     },
   }
 
   const resolved = engineControl.resolve()
-  console.log(`[core-host] 数据面引擎: ${resolved.engine}（${resolved.reason}）`)
+  console.log(`[core-host] 数据面: node（${resolved.reason}）`)
 
   const host = createHost({
     core,
@@ -366,7 +346,7 @@ async function main () {
     setting: undefined,
     onShutdown: async () => {
       // 界面点「退出」→ lib.rs 调 shutdown → 这里把数据面子进程也收干净，
-      // 否则 ds-proxy / mitmproxy 会变成孤儿进程占着端口。
+      // 否则 mitmproxy 子进程会变成孤儿进程占着端口。
       try {
         await core.api.server.close()
       } catch (e) {
@@ -391,7 +371,7 @@ async function main () {
     }
   }
 
-  console.log(`[core-host] 当前数据面: ${engineControl.status().engine}`)
+  console.log('[core-host] 数据面已就绪（node / @blue-frontier/mitmproxy）')
 
   let closing = false
   const shutdown = async (signal) => {

@@ -12,7 +12,7 @@
  *   - 运行期按路径加载磁盘模块（core）必须走 `createRequire(process.execPath)`。
  *
  * 另一个用途是「安装目录 → 资源目录」的解析，三个地方要用同一套规则
- * （core、shim、ds-proxy），集中在这里避免各写一份又对不上。
+ * （core、mitmproxy、core-bundle），集中在这里避免各写一份又对不上。
  */
 
 const fs = require('node:fs')

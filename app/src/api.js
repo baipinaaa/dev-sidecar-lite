@@ -64,21 +64,6 @@ export function startStatusStream () {
   })
 }
 
-/** core-host 的连通性信息（地址 / 是否就绪 / 版本）。 */
-export function coreInfo () {
-  return tauriInvoke ? tauriInvoke('core_info') : Promise.resolve({ ready: false, baseUrl: '(浏览器模式)' })
-}
-
-/** 数据面引擎状态：`rust` / `node` / `stopped`。 */
-export function engineStatus () {
-  return tauriInvoke ? tauriInvoke('engine_status') : Promise.resolve({ engine: 'mock' })
-}
-
-/** 切换数据面引擎（`rust` ⇄ `node`）。 */
-export function setEngine (engine) {
-  return tauriInvoke ? tauriInvoke('set_engine', { engine }) : Promise.resolve({ engine: 'mock' })
-}
-
 /** 打开外部链接（避免在 WebView 里直接跳走）。 */
 export async function openUrl (url) {
   if (!isTauri) {
@@ -108,7 +93,6 @@ const mockConfig = {
 const mockStatus = {
   server: { enabled: true },
   proxy: { enabled: true, pacEnabled: false },
-  engine: { rust: true },
   plugin: { git: { enabled: true }, node: { enabled: true }, pip: { enabled: false } }
 }
 

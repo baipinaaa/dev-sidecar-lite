@@ -12,7 +12,7 @@
 mod core_proc;
 mod legacy;
 
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -196,16 +196,8 @@ struct CoreInfo {
     error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct EngineStatus {
-    engine: String,
-    detail: Option<String>,
-}
-
 struct AppState {
     core: CoreClient,
-    engine: Mutex<EngineStatus>,
     stream: AsyncMutex<Option<tokio::task::JoinHandle<()>>>,
     core_proc: core_proc::CoreProcess,
 }
@@ -214,10 +206,6 @@ impl Default for AppState {
     fn default() -> Self {
         Self {
             core: CoreClient::new(),
-            engine: Mutex::new(EngineStatus {
-                engine: "unknown".to_string(),
-                detail: None,
-            }),
             stream: AsyncMutex::new(None),
             core_proc: core_proc::CoreProcess::new(),
         }
@@ -261,53 +249,6 @@ async fn legacy_check() -> Result<legacy::LegacyInfo, String> {
     Ok(legacy::detect())
 }
 
-#[tauri::command]
-async fn engine_status(state: State<'_, AppState>) -> Result<EngineStatus, String> {
-    if let Ok(status) = state.core.call("engine.status", None).await {
-        if let Some(name) = status.get("engine").and_then(Value::as_str) {
-            let detail = status.get("detail").and_then(Value::as_str).map(str::to_string);
-            let value = EngineStatus {
-                engine: name.to_string(),
-                detail,
-            };
-            if let Ok(mut guard) = state.engine.lock() {
-                *guard = value.clone();
-            }
-            return Ok(value);
-        }
-    }
-    Ok(state
-        .engine
-        .lock()
-        .map(|guard| guard.clone())
-        .unwrap_or_else(|_| EngineStatus {
-            engine: "unknown".to_string(),
-            detail: None,
-        }))
-}
-
-#[tauri::command]
-async fn set_engine(state: State<'_, AppState>, engine: String) -> Result<EngineStatus, String> {
-    if engine != "rust" && engine != "node" {
-        return Err(format!("未知引擎：{engine}"));
-    }
-
-    let _ = state
-        .core
-        .call("engine.set", Some(json!({ "engine": engine })))
-        .await;
-
-    let value = EngineStatus {
-        engine: engine.clone(),
-        detail: Some("重启代理后完全生效".to_string()),
-    };
-    if let Ok(mut guard) = state.engine.lock() {
-        *guard = value.clone();
-    }
-    Ok(value)
-}
-
-/// 订阅 core-host 的 SSE，把 `status` / `speed` / `traffic` / `log` 转发成 Tauri 事件。
 #[tauri::command]
 async fn start_status_stream(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     let mut guard = state.stream.lock().await;
@@ -506,8 +447,6 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             api_invoke,
             core_info,
-            engine_status,
-            set_engine,
             start_status_stream,
             legacy_check
         ])
