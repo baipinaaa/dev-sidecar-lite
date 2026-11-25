@@ -93,6 +93,15 @@ impl CoreProcess {
         info!("启动 core-host：{} {}", node.display(), entry.display());
 
         let mut command = Command::new(&node);
+        // entry = <bundle>/core-host/src/main.js → 往上三级拿到 bundle 根。
+        // 不显式给的话 core-host 只能靠 execPath 推（那是 <bundle>/node/node.exe，会推错一层）。
+        if let Some(bundle) = entry
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+        {
+            command.env("DS_CORE_BUNDLE", bundle);
+        }
         command
             .arg(&entry)
             .args([

@@ -116,6 +116,9 @@ function resolveCore () {
   // 这一层是为了「安装后没有 node_modules」，是文件数从三千降到几百的关键。
   const bundledCandidates = [
     process.env.DS_CORE_BUNDLE && path.join(process.env.DS_CORE_BUNDLE, 'bundle', 'core.cjs'),
+    // 安装后 execPath 是 `<bundle>/node/node.exe`，findInResources 会从 `<bundle>/node` 起算而落空；
+    // `__dirname` 是 `<bundle>/core-host/src`，往上两级才是 bundle 根
+    path.join(__dirname, '..', '..', 'bundle', 'core.cjs'),
     ...runtime.findInResources('core-bundle', 'bundle', 'core.cjs'),
   ].filter(Boolean)
   for (const file of bundledCandidates) {
@@ -189,6 +192,7 @@ function resolveMitmproxyPath () {
   // 打平布局：数据面整包打成了 <bundle>/bundle/mitmproxy.cjs
   const bundled = [
     process.env.DS_CORE_BUNDLE && path.join(process.env.DS_CORE_BUNDLE, 'bundle', 'mitmproxy.cjs'),
+    path.join(__dirname, '..', '..', 'bundle', 'mitmproxy.cjs'),
     ...runtime.findInResources('core-bundle', 'bundle', 'mitmproxy.cjs'),
   ].filter(Boolean)
 
