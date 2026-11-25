@@ -12,7 +12,7 @@
 
 | 部分 | 实现 | 状态 |
 | --- | --- | --- |
-| 控制面宿主 | `core-host/`（Node，随包下发的 `core-host/` + `bundle.cjs`） | ✅ 安装包实测：`getApiList` 124 个接口、`/healthz`、`/invoke`、SSE 全通 |
+| 控制面宿主 | `core-host/`（随包 `node.exe` + 磁盘上的 js，stdio JSON-RPC） | ✅ CI 安装冒烟：`ready` 帧、`getApiList` 124 个接口、数据面 `/pac.js` 200 |
 | 数据面 | 原版 `@blue-frontier/mitmproxy`，`core-bundle/` 内随包下发 | ✅ 实测 `/pac.js` 200、CONNECT + MITM 解密、按规则直连/走代理 |
 | 界面 | 原版 `packages/gui` 的 Vue 页面移植到 Tauri 2 | ✅ `vite build` 通过 |
 | 安装包 | NSIS（perMachine）+ 静默安装冒烟 | ✅ 冒烟覆盖「装→布局→healthz→getApiList→起数据面→/pac.js→卸载」 |
@@ -63,6 +63,7 @@ dev-sidecar-lite.exe       Tauri 2 外壳（WebView2 + 原版 Vue 页面）
 # 控制面（用仓库里的 dev-sidecar 源码，不装包）
 $env:DS_CORE_PATH = "..\dev-sidecar\packages\core"
 $env:DS_EXTRA_PATH = "..\dev-sidecar\packages\gui\extra"
+# 调试模式：HTTP + SSE（GUI 走的是 --stdio 管道）
 node core-host/src/main.js --port 31190 -v
 
 # 界面

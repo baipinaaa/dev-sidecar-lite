@@ -1,8 +1,8 @@
 // 与 Rust 侧的桥接。
 //
 // 数据流：
-//   前端 → invoke('api_invoke', {api, param}) → Tauri → HTTP POST /invoke → ds-core-host(Node core) → 真实 API
-//   状态 ← listen('status'|'speed'|'traffic') ← Tauri ← SSE GET /events ← ds-core-host
+//   前端 → invoke('api_invoke', {api, param}) → Tauri → stdio JSON-RPC → core-host（Node core）→ 真实 API
+//   状态 ← listen('status'|'speed'|'traffic') ← Tauri ← core-host stdout 事件 ← ds-core-host
 //
 // 在纯浏览器里跑（`npm run dev` 不开 Tauri）时自动降级为 mock，方便只调 UI。
 
@@ -50,10 +50,8 @@ export async function subscribe (name, handler) {
 }
 
 /**
- * 拉起 SSE 转发（Rust 侧一条长连接，把 core-host 的推送转成 Tauri 事件）。
- *
- * 这一步以前从没被调用过，所以状态栏永远不更新、只能靠界面上的乐观更新。
- * 重复调用是安全的：Rust 侧发现订阅已存活就直接返回。
+ * 占位：v0.3.0 起控制面的事件流由 Rust 侧常驻读取（`spawn_reader` 读 stdout），
+ * 不再需要在启动时「订阅」一次 SSE。保留调用是为了不改动 `main.js` 的挂载顺序。
  */
 export function startStatusStream () {
   if (!tauriInvoke) {

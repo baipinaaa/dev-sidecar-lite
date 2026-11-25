@@ -47,7 +47,8 @@ foreach ($c in $cert) { Remove-Item -Path $c.PSPath -Force }
 ## 二、装新版
 
 1. 运行 `DevSidecar Lite_<version>_x64-setup.exe`。
-2. 首次启动会在 `<数据目录>/run/` 下生成 `core.token`（**别外传**，它能改系统代理）。
+2. 首次启动不会生成任何凭据文件：GUI 与控制面之间的通道是本进程的管道（stdio JSON-RPC），
+   不监听端口。只有手动用 `--port` 起调试模式时才会生成 `<数据目录>/run/core.token`。
 3. 首次开「系统代理」或「PAC 分流」时会提示装根证书 —— 这一步不可跳过，否则 HTTPS 会报
    `NET::ERR_CERT_AUTHORITY_INVALID`。
 

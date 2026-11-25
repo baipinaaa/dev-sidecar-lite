@@ -3,16 +3,23 @@
 /**
  * 控制面入口（由 Tauri 壳用 `core-bundle/node/node.exe` 拉起）。
  *
- * 职责：加载 Node core（控制面），起 HTTP/SSE 宿主，然后把「服务/系统代理/PAC/插件」
+ * 职责：加载 Node core（控制面），起 RPC 宿主，然后把「服务/系统代理/PAC/插件」
  * 按用户配置恢复到上次的状态。数据面由 core 自己 fork 拉起（Node mitmproxy）。
  *
+ * 两种传输：
+ *   --stdio          GUI 用的方式：stdin/stdout 走 NDJSON JSON-RPC（见 ./rpc.js），不占端口
+ *   --port <n>       调试用：HTTP + SSE，带 token 鉴权（见 ./http.js）
+ *
  * 用法：
+ *   node src/main.js --stdio [--data-dir <dir>] [--no-startup] [-v]
  *   node src/main.js [--port 31190] [--host 127.0.0.1] [--data-dir <dir>] [--no-startup] [-v]
  */
 
 const fs = require('node:fs')
 const path = require('node:path')
 
+const rpc = require('./rpc')
+const { createHttpTransport } = require('./http')
 const { createHost, resolveDataDir } = require('./host')
 const { createLocalApi } = require('./local-api')
 const { entryFor, resolveEngine } = require('./engine')
@@ -25,11 +32,15 @@ function parseArgs (argv) {
     dataDir: process.env.DS_DATA_DIR || null,
     startup: true,
     verbose: false,
+    stdio: false,
   }
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
     switch (arg) {
+      case '--stdio':
+        options.stdio = true
+        break
       case '--port':
         options.port = Number(argv[++i])
         break
@@ -63,10 +74,11 @@ function parseArgs (argv) {
 function printUsage () {
   console.log(`ds-core-host — DevSidecar Lite 控制面宿主
 
-  --port <n>        监听端口（默认 31190，0 表示随机）
+  --stdio           stdin/stdout 走 JSON-RPC（GUI 用；端口与 token 都不需要）
+  --port <n>        HTTP 调试模式监听端口（默认 31190，0 表示随机）
   --host <addr>     监听地址（默认 127.0.0.1，只允许回环）
   --data-dir <dir>  数据目录（默认 %ProgramData%\\dev-sidecar-lite）
-  --no-startup      只起 HTTP，不自动恢复代理/系统代理/插件
+  --no-startup      只起宿主，不自动恢复代理/系统代理/插件
   -v, --verbose     打印接口调用明细
 
 环境变量:
@@ -211,7 +223,49 @@ function resolveBundleRoot (coreDir) {
   return null
 }
 
+/**
+ * stdio 模式下 stdout 是协议专用通道：把 console 的五个方法全指到 stderr。
+ *
+ * 只改 `process.stdout.write` 还不够稳（有些库缓存了 stdout 的引用），
+ * 这里连 console 方法一起换掉，双保险。
+ */
+function redirectConsoleToStderr () {
+  const toStderr = (level) => (...args) => {
+    process.stderr.write(`[${level}] ${args.map((item) => (typeof item === 'string' ? item : safeInspect(item))).join(' ')}\n`)
+  }
+  console.log = toStderr('core-host')
+  console.info = console.log
+  console.debug = console.log
+  console.warn = toStderr('warn')
+  console.error = toStderr('error')
+}
+
+function safeInspect (value) {
+  try {
+    return typeof value === 'object' ? JSON.stringify(value) : String(value)
+  } catch (e) {
+    return String(value)
+  }
+}
+
+function readBundleVersion (bundleRoot) {
+  if (!bundleRoot) {
+    return null
+  }
+  try {
+    return fs.readFileSync(path.join(bundleRoot, 'VERSION'), 'utf-8').trim() || null
+  } catch (e) {
+    return null
+  }
+}
+
 async function main () {
+  // stdio 判断要赶在 parseArgs 与一切日志之前：stdout 从第一帧起就只能是协议数据
+  if (process.argv.includes('--stdio')) {
+    rpc.takeOverStdout()
+    redirectConsoleToStderr()
+  }
+
   const options = parseArgs(process.argv.slice(2))
   const dataDir = options.dataDir || resolveDataDir()
   process.env.DS_DATA_DIR = dataDir
@@ -326,9 +380,43 @@ async function main () {
   })
   hostRef.value = host
 
-  const address = await host.listen(options.host, options.port)
-  console.log(`[core-host] 监听 http://${address.host}:${address.port}`)
-  console.log(`[core-host] 凭据: ${path.join(dataDir, 'run', 'core.token')}`)
+  // ---- 传输层 ----
+  let transport = null
+  if (options.stdio) {
+    const server = rpc.serve({
+      handleInvoke: host.handleInvoke,
+      info: () => ({
+        pid: process.pid,
+        version: readBundleVersion(bundleRoot),
+        engine: 'node',
+        dataDir,
+        bundleRoot,
+        extraPath: process.env.DS_EXTRA_PATH || null,
+        node: process.version,
+      }),
+      onShutdown: async () => {
+        try {
+          await core.api.shutdown()
+        } catch (e) {
+          console.error('[core-host] 关闭时出错:', e && e.message ? e.message : e)
+        }
+      },
+    })
+    transport = { kind: 'stdio', server }
+    // 事件流：host 的广播直接变成协议帧
+    host.subscribe((channel, payload) => server.notify(channel, payload))
+    server.ready({
+      pid: process.pid,
+      version: readBundleVersion(bundleRoot),
+      engine: 'node',
+    })
+  } else {
+    const httpTransport = createHttpTransport({ host, dataDir })
+    const address = await httpTransport.listen(options.host, options.port)
+    transport = { kind: 'http', server: httpTransport }
+    console.log(`[core-host] 监听 http://${address.host}:${address.port}`)
+    console.log(`[core-host] 凭据: ${path.join(dataDir, 'run', 'core.token')}`)
+  }
 
   if (options.startup) {
     try {
@@ -341,7 +429,7 @@ async function main () {
     }
   }
 
-  console.log('[core-host] 数据面已就绪（node / @blue-frontier/mitmproxy）')
+  console.log(`[core-host] 宿主已就绪（${transport.kind} / node 数据面）`)
 
   let closing = false
   const shutdown = async (signal) => {
@@ -355,7 +443,10 @@ async function main () {
     } catch (err) {
       console.error('[core-host] 关闭时出错:', err && err.message ? err.message : err)
     }
-    await host.close()
+    host.close()
+    if (transport.kind === 'http') {
+      await transport.server.close()
+    }
     process.exit(0)
   }
 

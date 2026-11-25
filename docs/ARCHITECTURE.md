@@ -55,19 +55,28 @@
 
 ## 三、控制面协议
 
+v0.3.0 起 GUI 与核心用**管道**说话：`ds-core-host` 的 stdin/stdout 就是 RPC 通道，
+一行一个 JSON（NDJSON），不需要端口、不需要凭据，也不存在「谁先起来」的竞态。
+
 | 项目 | 值 |
 | --- | --- |
-| 地址 | `http://127.0.0.1:31190`（只绑回环；`DS_CORE_PORT` 可覆盖） |
-| 凭据 | `<dataDir>/run/core.token`（48 hex，权限 0600），请求头 `Authorization: Bearer <token>` |
-| 免鉴权 | 只有 `GET /healthz` |
-| 调用 | `POST /invoke`，body `{ "api": "proxy.start", "param": null }`；成功返回**裸数据**，失败返回 `{ok:false,error,code}` |
-| 事件 | `GET /events`，SSE，帧格式 `event: <channel>` + `data: <json>` |
+| 传输 | Tauri 壳 `spawn(node.exe, [core-bundle/core-host/main.js, --stdio])`，stdin/stdout 收发 |
+| 调用 | `{"jsonrpc":"2.0","id":1,"method":"api.invoke","params":{"api":"proxy.start","param":null}}` |
+| 成功 | `{"jsonrpc":"2.0","id":1,"result":<任意 JSON>}`（裸数据，与 Electron 版回调一致） |
+| 失败 | `{"jsonrpc":"2.0","id":1,"error":{"code":"unknown_api","message":"api 接口不存在: x"}}` |
+| 事件 | `{"jsonrpc":"2.0","method":"event","params":{"channel":"status","payload":{...}}}` |
+| 就绪 | `{"jsonrpc":"2.0","method":"ready","params":{"pid":1234,"version":"0.3.0","engine":"node"}}` |
+| 其他方法 | `core.info`（版本/数据目录）、`shutdown`（关数据面并退出） |
 | 事件通道 | `status` / `speed` / `traffic` / `error` / `log` / `config.changed` |
 
 `api` 名字与 Electron 版的 `$api.xxx` 完全一致，所以 `packages/gui` 的页面可以逐页对照移植。
 
-SSE 会先经 Tauri 侧 `stream_events()` 转成 `core-event`（payload `{channel, payload}`）再交给前端，
+Tauri 侧读到事件后统一转成 `core-event`（payload `{channel, payload}`）再交给前端，
 原因是 Tauri 的事件名不接受点号，`config.changed` 这类名字会被静默丢弃。
+协议实现见 `core-host/src/rpc.js`（核心）与 `app/src-tauri/src/lib.rs` 的 `CoreRpc`（壳）。
+
+**HTTP + SSE 仍然保留，但只用于调试**（`node core-host/src/main.js --port 31190`）：
+`POST /invoke`、`GET /events`、`GET /healthz`，凭据在 `<dataDir>/run/core.token`。
 
 ## 四、数据面如何被拉起
 
@@ -93,7 +102,7 @@ core.api.server.start({ mitmproxyPath, setting })
 | 用户配置 | `C:\Users\<你>\.dev-sidecar-lite\config.json`（`config.json5` 兼容） |
 | 根证书 | 同目录 `dev-sidecar.ca.crt` / `dev-sidecar.ca.key` |
 | 日志 | 同目录 `log\`；控制面自身日志在 `%ProgramData%\dev-sidecar-lite\log\core-host.log` |
-| 运行时 | `%ProgramData%\dev-sidecar-lite\{run\core.token, running.json}` |
+| 运行时 | `%ProgramData%\dev-sidecar-liteunning.json`（`run/core.token` 只在 HTTP 调试模式生成） |
 
 core 内部把 `~/.dev-sidecar` 写死在十几个位置，本项目不改上游代码，而是在加载时对
 `@blue-frontier/**` 的源码做一次字面量替换（`core-host/src/runtime.js` 的 `installUserDir()`），

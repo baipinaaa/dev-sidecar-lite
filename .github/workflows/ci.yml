@@ -8,7 +8,8 @@ name: ci
 # 为什么把 core-host 冒烟放进 CI：0.1.0 的教训是「编译全绿、装完不能用」——
 # 控制面没把用户配置合并进来、数据面 bridge 找不到 mitmproxy，
 # 这些问题只有跑起来才看得见。这里用 `-NodeEntry` 模式跑（不需要预先打包），
-# 断言链：/healthz → getApiList → server.start → HEAD /pac.js 200 → server.close。
+# 断言链（控制面走 stdio JSON-RPC，探针在 scripts/rpc-probe.mjs）：
+# ready 帧 → getApiList → config.save → server.start → HEAD /pac.js 200 → server.close。
 
 on:
   push:
@@ -88,7 +89,7 @@ jobs:
           PNPM_BIN: pnpm
         run: node scripts/prepare-core-bundle.mjs --dev-sidecar core-src --max-mb $env:CORE_BUNDLE_MAX_MB
 
-      - name: core-host 冒烟（healthz → getApiList → 数据面 /pac.js → close）
+      - name: core-host 冒烟（ready → getApiList → 数据面 /pac.js → close）
         shell: pwsh
         run: |
           [Console]::OutputEncoding = [System.Text.Encoding]::UTF8

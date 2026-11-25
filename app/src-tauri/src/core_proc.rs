@@ -1,23 +1,24 @@
-//! 控制面进程（`node.exe core-bundle/core-host/main.js`）的启停。
+//! 控制面进程（`node.exe core-bundle/core-host/main.js --stdio`）的启停。
 //!
 //! 为什么需要它：GUI 只是壳，所有「配置/服务/系统代理/PAC/插件」都在 core 里。
 //! 之前没有这段代码，安装后点任何按钮都只会得到「core-host 不可达」，
 //! 用户看到的就是「点了没反应」。
 //!
-//! v0.3.0 起控制面不再是 SEA 单文件 exe，而是「随包的 node 运行时 + 磁盘上的 js」：
-//! 这样 `fork()` 与 `require()` 都是原生语义，不再需要 fork 改写与 createRequire 兜底。
+//! v0.3.0 起控制面是「随包的 node 运行时 + 磁盘上的 js + stdio JSON-RPC」：
+//! 不占端口、不需要 token、也不需要 fork 改写（`fork()` 在真 node 上是原生语义）。
 
-use std::net::{SocketAddr, TcpStream};
+use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
 
 use tracing::{info, warn};
 
-/// 与 `lib.rs` 的 `DEFAULT_CORE_HOST` 保持一致
-const CORE_PORT: u16 = 31190;
-const CORE_HOST: &str = "127.0.0.1";
+/// 控制面的 stdin/stdout：交给 `lib.rs` 的 RPC 层接管。
+pub struct CoreStdio {
+    pub stdin: ChildStdin,
+    pub stdout: ChildStdout,
+}
 
 pub struct CoreProcess {
     child: Mutex<Option<Child>>,
@@ -29,10 +30,12 @@ impl Default for CoreProcess {
     }
 }
 
-/// 控制面的 stdout/stderr 落盘。
+/// 控制面的 stderr 落盘。
 ///
 /// 之前这里是 `Stdio::null()`：core-host 崩了、插件报错了、端口占了，全都随风而逝，
 /// 用户只说得出「点了没反应」，我们只能靠 CDP 一步步翻——这就是代价。
+/// stdio 模式下 stdout 是协议通道，所以日志只能走 stderr（core-host 自己也把
+/// console 全部改道到 stderr）。
 fn log_sink() -> Stdio {
     let dir = std::env::var("PROGRAMDATA")
         .map(|base| PathBuf::from(base).join("dev-sidecar-lite").join("log"))
@@ -72,36 +75,34 @@ impl CoreProcess {
         }
     }
 
-    /// 启动控制面。已经在监听就直接复用（可能是上次没退干净的实例）。
-    pub fn start(&self) {
-        if port_open(CORE_PORT) {
-            info!("core-host 已在监听 {CORE_HOST}:{CORE_PORT}，直接复用");
-            return;
+    /// 启动控制面，并把它 stdin/stdout 的两端交出去做 RPC。
+    ///
+    /// 不复用「已经有一个实例在跑」的情况：stdio 模式下控制面与本进程是一对一的，
+    /// 抢占别人的管道没有意义（同机双开会先被单实例插件挡掉）。
+    pub fn start(&self) -> Option<CoreStdio> {
+        if self.child.lock().unwrap().is_some() {
+            return None;
         }
 
-        let node = locate_node();
         let Some(entry) = locate_entry() else {
             warn!("找不到 core-bundle/core-host/main.js，控制面不会启动（界面操作都会失败）");
-            return;
+            return None;
         };
+        let node = locate_node();
 
         info!("启动 core-host：{} {}", node.display(), entry.display());
 
-        let port = CORE_PORT.to_string();
         let mut command = Command::new(&node);
         command
             .arg(&entry)
             .args([
-                "--host",
-                CORE_HOST,
-                "--port",
-                port.as_str(),
+                "--stdio",
                 // 不在启动时恢复代理：避免开机后被上次的开关状态直接改掉系统代理，
                 // 用户点开关时再由 core 自己按配置生效。
                 "--no-startup",
             ])
-            .stdin(Stdio::null())
-            .stdout(log_sink())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
             .stderr(log_sink());
 
         #[cfg(windows)]
@@ -111,24 +112,20 @@ impl CoreProcess {
             command.creation_flags(CREATE_NO_WINDOW);
         }
 
-        match command.spawn() {
-            Ok(child) => {
-                info!("core-host 已启动，pid={}", child.id());
-                *self.child.lock().unwrap() = Some(child);
-
-                // 等它真的能接受连接：前端首次调用不该撞在启动窗口上
-                let deadline = Instant::now() + Duration::from_secs(20);
-                while Instant::now() < deadline {
-                    if port_open(CORE_PORT) {
-                        info!("core-host 已就绪（{CORE_PORT}）");
-                        return;
-                    }
-                    std::thread::sleep(Duration::from_millis(200));
-                }
-                warn!("core-host 20 秒内没有监听 {CORE_PORT}，界面可能不可用");
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(err) => {
+                warn!("启动 core-host 失败：{err}");
+                return None;
             }
-            Err(err) => warn!("启动 core-host 失败：{err}"),
-        }
+        };
+
+        let stdin = child.stdin.take()?;
+        let stdout = child.stdout.take()?;
+        info!("core-host 已启动，pid={}", child.id());
+        *self.child.lock().unwrap() = Some(child);
+
+        Some(CoreStdio { stdin, stdout })
     }
 
     /// 结束控制面。用 `taskkill /T` 连带子进程（core 会 fork 出数据面）。
@@ -153,11 +150,6 @@ impl CoreProcess {
             let _ = child.wait();
         }
     }
-}
-
-fn port_open(port: u16) -> bool {
-    let addr: SocketAddr = format!("{CORE_HOST}:{port}").parse().expect("地址固定合法");
-    TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok()
 }
 
 /// 安装包里的 Node 运行时：`$INSTDIR/core-bundle/node/node.exe`（随 Tauri resources 下发）。
@@ -194,4 +186,11 @@ fn locate_entry() -> Option<PathBuf> {
     ];
 
     candidates.into_iter().find(|path| path.is_file())
+}
+
+/// 同步写一帧（退出收尾用）。
+pub fn write_frame_blocking(stdin: &mut ChildStdin, frame: &str) -> std::io::Result<()> {
+    stdin.write_all(frame.as_bytes())?;
+    stdin.write_all(b"\n")?;
+    stdin.flush()
 }

@@ -12,11 +12,9 @@
       1. 静默安装成功，`$INSTDIR` 里有 node 运行时与 core-bundle
       2. core-bundle 真的在安装目录里（`core-bundle/node_modules/@blue-frontier/dev-sidecar`）
       3. `core-bundle/extra/sysproxy.exe` 存在（缺它则系统代理/PAC 全不可用）
-      4. 用**安装目录里的** node + core-bundle/core-host/main.js 起控制面：`/healthz` 正常
-      5. `getApiList` 覆盖前端需要的接口名
-      6. `server.start` → `HEAD /pac.js` 返回 200（数据面真的在跑）
-      7. `server.close` 后端口释放
-      8. 静默卸载，安装目录被清掉
+      4. 用**安装目录里的** node + `core-bundle/core-host/main.js --stdio` 做一次完整 RPC 冒烟：
+         `ready` 帧 → `getApiList` → `server.start` → `HEAD /pac.js` 200 → `server.close` → `shutdown`
+      5. 静默卸载，安装目录被清掉
 
     全程用隔离的 USERPROFILE / DS_DATA_DIR，端口用高位随机端口，
     不碰用户真实配置，也不依赖本机是否装了 dev-sidecar。
@@ -248,114 +246,22 @@ try {
     $env:HOME = $homeDir
     $env:DS_DATA_DIR = $dataDir
 
-    Write-Host '==> 4/8 启动控制面（随包 node + core-bundle/core-host/main.js）'
-    $stdout = Join-Path $work 'core-host.out.log'
-    $stderr = Join-Path $work 'core-host.err.log'
-    $proc = Start-Process -FilePath $nodeExe `
-        -ArgumentList $entryJs, '--port', $Port, '--no-startup' `
-        -RedirectStandardOutput $stdout -RedirectStandardError $stderr `
-        -PassThru -WindowStyle Hidden
-
-    $base = "http://127.0.0.1:$Port"
-    $health = $null
-    Wait-Until -TimeoutSeconds $TimeoutSeconds -What '/healthz' -Condition {
-        if ($proc.HasExited) { return $true }
-        try {
-            $script:health = Invoke-RestMethod -Uri "$base/healthz" -TimeoutSec 2
-            return ($null -ne $script:health)
-        } catch {
-            return $false
-        }
-    } | Out-Null
-
-    if ($proc.HasExited) {
-        $detail = "控制面启动即退出（exit=$($proc.ExitCode)）"
-        throw $detail
-    }
-    if (-not $health) {
-        $detail = "/healthz 在 ${TimeoutSeconds}s 内没有应答"
+    Write-Host '==> 4/6 控制面 stdio 冒烟（ready → getApiList → 数据面 → /pac.js → 关闭）'
+    $probe = Join-Path $root 'scripts/rpc-probe.mjs'
+    if (-not (Test-Path -LiteralPath $probe)) {
+        $detail = "找不到探针脚本：$probe"
         throw $detail
     }
 
-    Write-Host '==> 5/8 调 getApiList'
-    $tokenFile = Join-Path $dataDir 'run/core.token'
-    if (-not (Wait-Until -TimeoutSeconds 30 -What 'token 文件' -Condition { Test-Path $tokenFile })) {
-        $detail = "没有生成 token：$tokenFile"
+    & $nodeExe $probe --node $nodeExe --entry $entryJs `
+        --data-dir $dataDir --home $homeDir --port $ProxyPort --timeout ($TimeoutSeconds * 1000)
+    if ($LASTEXITCODE -ne 0) {
+        $detail = "控制面 stdio 冒烟失败（退出码 $LASTEXITCODE，看上面 [失败] 行）"
         throw $detail
     }
-    $token = (Get-Content $tokenFile -Raw).Trim()
-    $headers = @{ Authorization = "Bearer $token" }
-    # -NoProxy：runner 上可能配了系统代理，127.0.0.1 不该走代理
-    $invokeRaw = {
-        param([string]$api, $param = $null)
-        $body = @{ api = $api; param = $param } | ConvertTo-Json -Compress -Depth 12
-        try {
-            (Invoke-WebRequest -Uri "$base/invoke" -Method Post -Headers $headers `
-                    -ContentType 'application/json' -Body $body -TimeoutSec 120 -NoProxy).Content
-        } catch {
-            # 500 时 Invoke-WebRequest 只抛状态码，真正的错误在响应体里
-            $resp = $_.ErrorDetails.Message
-            if ($resp) { $resp } else { throw }
-        }
-    }
-    $invoke = {
-        param([string]$api, $param = $null)
-        & $invokeRaw $api $param | ConvertFrom-Json
-    }
+    Write-Host '    控制面与数据面冒烟均通过'
 
-    $rawApiList = & $invokeRaw 'getApiList'
-    $apiList = @($rawApiList | ConvertFrom-Json)
-    if ($rawApiList -match '"ok"\s*:\s*false') {
-        $detail = "getApiList 调用失败：$rawApiList"
-        throw $detail
-    }
-    if ($apiList.Count -lt 20) {
-        $head = $rawApiList.Substring(0, [Math]::Min(800, $rawApiList.Length))
-        $detail = "getApiList 只返回 $($apiList.Count) 项，原始响应：$head"
-        throw $detail
-    }
-    $required = @('server.start', 'server.close', 'proxy.start', 'config.get', 'config.save',
-        'setting.load', 'setting.save', 'serviceGroups.list', 'info.get',
-        'shell.openPath', 'getApiList')
-    $missing = @($required | Where-Object { $apiList -notcontains $_ })
-    if ($missing.Count -gt 0) {
-        $detail = "getApiList 缺少接口：$($missing -join ', ')（共 $($apiList.Count) 项）"
-        throw $detail
-    }
-    Write-Host "    接口齐全（$($apiList.Count) 项）"
-
-    Write-Host '==> 6/8 起数据面并请求 /pac.js'
-    $started = & $invoke 'server.start'
-    if (-not $started -or -not $started.port) {
-        $detail = "server.start 没有返回端口：$($started | ConvertTo-Json -Compress -Depth 3)"
-        throw $detail
-    }
-    $pacOk = Wait-Until -TimeoutSeconds 60 -What '/pac.js 200' -Condition {
-        try {
-            $r = Invoke-WebRequest -Uri "http://127.0.0.1:$($started.port)/pac.js" `
-                -Method Head -TimeoutSec 3 -NoProxy
-            return ($r.StatusCode -eq 200)
-        } catch {
-            return $false
-        }
-    }
-    if (-not $pacOk) {
-        $detail = "数据面起了但 /pac.js 不可用（端口 $($started.port)）"
-        throw $detail
-    }
-    Write-Host '    数据面正常'
-
-    Write-Host '==> 7/8 关闭数据面'
-    & $invoke 'server.close' | Out-Null
-    $released = Wait-Until -TimeoutSeconds 30 -What '端口释放' -Condition {
-        -not (Get-NetTCPConnection -LocalPort $started.port -State Listen -ErrorAction SilentlyContinue)
-    }
-    if (-not $released) {
-        $detail = "server.close 之后端口 $($started.port) 仍在监听"
-        throw $detail
-    }
-
-    Write-Host '==> 8/8 卸载'
+    Write-Host '==> 5/6 卸载'
     if ($proc -and -not $proc.HasExited) {
         Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
     }
@@ -373,7 +279,7 @@ try {
     }
 
     $ok = $true
-    $detail = "安装→布局→healthz→getApiList($($apiList.Count) 项)→数据面 /pac.js 200→关闭→卸载，全链路通过"
+    $detail = "安装→布局→控制面 stdio 冒烟（ready/getApiList/数据面 /pac.js 200/close）→卸载，全链路通过"
 } catch {
     $detail = $_.Exception.Message
 } finally {

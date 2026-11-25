@@ -2,212 +2,253 @@
 //!
 //! 职责边界：
 //! - **不做代理**：数据面是 Node mitmproxy（由控制面 `fork` 拉起），控制面是
-//!   `node.exe core-bundle/core-host/main.js`（Node core）
-//! - **只做桥接**：前端 `invoke('api_invoke')` → 这里 → HTTP → core-host
+//!   `node.exe core-bundle/core-host/main.js --stdio`（Node core）
+//! - **只做桥接**：前端 `invoke('api_invoke')` → 这里 → stdio JSON-RPC → core-host
 //! - **托盘与单实例**：`PAC 分流`、`系统代理`、`代理服务` 三个复选框与首页开关同源
 //!
-//! 端口与凭据约定（与 `core-host` 对齐）：
-//! - 地址：环境变量 `DS_CORE_HOST_URL`，默认 `http://127.0.0.1:31190`
-//! - 凭据：环境变量 `DS_CORE_HOST_TOKEN`，或 `<数据目录>/run/core.token` 文件内容
+//! 为什么用管道而不是 HTTP：控制面是本进程的子进程，管道没有端口、没有 token、
+//! 没有 SSE 超时，也不存在「谁先起来」的竞态。协议见 `core-host/src/rpc.js`。
 
 mod core_proc;
 mod legacy;
 
-use std::sync::{Arc, RwLock};
+use std::collections::HashMap;
+use std::io::BufRead;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, State};
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::oneshot;
+use tracing::{info, warn};
 
-const DEFAULT_CORE_HOST: &str = "http://127.0.0.1:31190";
+/// 单个接口的最长等待时间。core 里有几个接口会真的等网络（测速、拉远程配置），
+/// 但都不该超过这个数；超时直接给前端一个明确的错误，而不是让按钮一直转圈。
+const CALL_TIMEOUT: Duration = Duration::from_secs(60);
 
-#[derive(Debug, Clone)]
-struct CoreClient {
-    base_url: String,
-    /// core-host 是本进程拉起来的，token 文件在**它启动之后**才存在。
-    /// 若启动时读一次就定死，首次安装必然是 `None`：`/invoke` 每次重读盘所以没事，
-    /// 但 SSE 那条长连接会一直带空 token 被 401 拒绝，重连多少次都一样 ——
-    /// 界面症状就是「点什么都没反应」（后端其实已经在动）。
-    token: Arc<RwLock<Option<String>>>,
-    http: reqwest::Client,
+/// 与 core-host 的 stdio JSON-RPC 通道。
+#[derive(Clone)]
+struct CoreRpc {
+    stdin: Arc<Mutex<Option<std::process::ChildStdin>>>,
+    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>,
+    next_id: Arc<AtomicU64>,
+    alive: Arc<AtomicBool>,
+    /// core-host 启动后发的 `ready` 帧（pid / version / engine）。
+    ready: Arc<RwLock<Option<Value>>>,
 }
 
-impl CoreClient {
+impl CoreRpc {
     fn new() -> Self {
-        let base_url = std::env::var("DS_CORE_HOST_URL").unwrap_or_else(|_| DEFAULT_CORE_HOST.to_string());
-        let token = std::env::var("DS_CORE_HOST_TOKEN").ok().or_else(read_token_file);
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .no_proxy()
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
         Self {
-            base_url,
-            token: Arc::new(RwLock::new(token)),
-            http,
+            stdin: Arc::new(Mutex::new(None)),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            next_id: Arc::new(AtomicU64::new(1)),
+            alive: Arc::new(AtomicBool::new(false)),
+            ready: Arc::new(RwLock::new(None)),
         }
     }
 
-    /// 取 token：缓存命中直接用，否则读一次盘并回填。
-    fn token(&self) -> Option<String> {
-        if let Ok(guard) = self.token.read() {
-            if let Some(token) = guard.as_ref() {
-                return Some(token.clone());
-            }
-        }
-        let from_disk = read_token_file()?;
-        if let Ok(mut guard) = self.token.write() {
-            *guard = Some(from_disk.clone());
-        }
-        Some(from_disk)
+    fn attach(&self, stdin: std::process::ChildStdin) {
+        *self.stdin.lock().unwrap() = Some(stdin);
+    }
+
+    fn writable(&self) -> bool {
+        self.stdin.lock().map(|guard| guard.is_some()).unwrap_or(false)
+    }
+
+    /// 写一帧。stdin 是同步管道，写一行 JSON 是微秒级操作，不会卡住运行时。
+    fn write_frame(&self, frame: &str) -> Result<(), String> {
+        let mut guard = self.stdin.lock().unwrap();
+        let Some(stdin) = guard.as_mut() else {
+            return Err("控制面还没就绪（无法写入管道）".to_string());
+        };
+        core_proc::write_frame_blocking(stdin, frame)
+            .map_err(|err| format!("写控制面管道失败：{err}"))
     }
 
     async fn call(&self, api: &str, param: Option<Value>) -> Result<Value, String> {
-        let url = format!("{}/invoke", self.base_url.trim_end_matches('/'));
-
-        // core-host 是本进程拉起来的，首次启动要等它监听（Defender 扫 69MB 的 exe 要几秒）。
-        // 以前这里是「一发定生死」，抢在启动窗口里就报「core-host 不可达」，
-        // 前端 boot 阶段拿到它就直接画红屏——所以这里重试几次。
-        let mut last_err = String::new();
-        let mut response = None;
-        for attempt in 0..4u32 {
-            let mut request = self
-                .http
-                .post(&url)
-                .json(&json!({ "api": api, "param": param.clone().unwrap_or(Value::Null) }));
-
-            if let Some(token) = self.token() {
-                request = request.bearer_auth(token);
+        // core 刚被拉起时管道已接、但 main.js 还没跑到读循环；给几次重试，
+        // 否则首屏那几个接口会一起失败（Electron 版没有这个窗口，因为它是先起进程再开窗）。
+        let mut attempt = 0u32;
+        while !self.writable() {
+            if attempt >= 40 {
+                return Err("控制面未启动（core-host 没能拉起）".to_string());
             }
+            attempt += 1;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
 
-            match request.send().await {
-                Ok(resp) => {
-                    response = Some(resp);
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = oneshot::channel();
+        self.pending.lock().unwrap().insert(id, tx);
+
+        let frame = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "api.invoke",
+            "params": { "api": api, "param": param.unwrap_or(Value::Null) }
+        })
+        .to_string();
+
+        if let Err(err) = self.write_frame(&frame) {
+            self.pending.lock().unwrap().remove(&id);
+            return Err(err);
+        }
+
+        match tokio::time::timeout(CALL_TIMEOUT, rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err("控制面管道已断开".to_string()),
+            Err(_) => {
+                self.pending.lock().unwrap().remove(&id);
+                Err(format!("控制面 {} 秒未响应：{api}", CALL_TIMEOUT.as_secs()))
+            }
+        }
+    }
+
+    /// 退出收尾：同步地让 core 关掉系统代理与数据面。
+    ///
+    /// 不能用 async：`RunEvent::Exit` 是同步回调。写一帧后等一会儿让 core 把它做完，
+    /// 剩下的交给 `core_proc.stop()`（taskkill /T 会连带数据面）。
+    fn close_proxy_blocking(&self) {
+        if !self.writable() {
+            return;
+        }
+        let frame = json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "api.invoke",
+            "params": { "api": "proxy.close", "param": Value::Null }
+        })
+        .to_string();
+
+        match self.write_frame(&frame) {
+            Ok(()) => {
+                info!("已请求控制面关闭系统代理");
+                std::thread::sleep(Duration::from_millis(700));
+            }
+            Err(err) => warn!(%err, "退出前关闭系统代理失败"),
+        }
+    }
+
+    fn ready_info(&self) -> Option<Value> {
+        self.ready.read().ok().and_then(|guard| guard.clone())
+    }
+}
+
+/// 读控制面的 stdout：每行一帧，按 `id` 回填请求、按 `method` 转发事件。
+fn spawn_reader(app: AppHandle, core: CoreRpc, stdout: std::process::ChildStdout) {
+    std::thread::spawn(move || {
+        let reader = std::io::BufReader::new(stdout);
+        for line in reader.lines() {
+            let line = match line {
+                Ok(line) => line,
+                Err(err) => {
+                    warn!(%err, "读控制面管道失败");
                     break;
                 }
-                Err(err) => {
-                    last_err = format!("core-host 不可达（{url}）：{err}");
-                    if attempt < 3 {
-                        tokio::time::sleep(Duration::from_millis(700)).await;
+            };
+            let text = line.trim();
+            if text.is_empty() {
+                continue;
+            }
+
+            let msg: Value = match serde_json::from_str(text) {
+                Ok(value) => value,
+                Err(_) => {
+                    // 协议污染（有东西往 stdout 写了日志）：不致命，记下来就行
+                    warn!(line = %text, "控制面 stdout 出现非协议数据");
+                    continue;
+                }
+            };
+
+            if let Some(id) = msg.get("id").and_then(Value::as_u64) {
+                let sender = core.pending.lock().unwrap().remove(&id);
+                if let Some(sender) = sender {
+                    let payload = match msg.get("error") {
+                        Some(error) => {
+                            let message = error
+                                .get("message")
+                                .and_then(Value::as_str)
+                                .unwrap_or("控制面返回错误")
+                                .to_string();
+                            let code = error.get("code").and_then(Value::as_str).unwrap_or("api_error");
+                            Err(format!("{message}（{code}）"))
+                        }
+                        None => Ok(msg.get("result").cloned().unwrap_or(Value::Null)),
+                    };
+                    let _ = sender.send(payload);
+                }
+                continue;
+            }
+
+            match msg.get("method").and_then(Value::as_str) {
+                Some("event") => {
+                    let params = msg.get("params").cloned().unwrap_or(Value::Null);
+                    let channel = params
+                        .get("channel")
+                        .and_then(Value::as_str)
+                        .unwrap_or("message")
+                        .to_string();
+                    let payload = params.get("payload").cloned().unwrap_or(Value::Null);
+                    let _ = app.emit(
+                        "core-event",
+                        json!({ "channel": channel, "payload": payload.clone() }),
+                    );
+                    // 保留窄通道，兼容早期前端（这四个都是合法 Tauri 事件名）
+                    if matches!(channel.as_str(), "status" | "speed" | "traffic" | "log") {
+                        let _ = app.emit(&channel, payload);
                     }
                 }
+                Some("ready") => {
+                    let params = msg.get("params").cloned().unwrap_or(Value::Null);
+                    info!(
+                        pid = params.get("pid").and_then(Value::as_u64).unwrap_or(0),
+                        version = params.get("version").and_then(Value::as_str).unwrap_or("未知"),
+                        "控制面已就绪"
+                    );
+                    *core.ready.write().unwrap() = Some(params);
+                    core.alive.store(true, Ordering::SeqCst);
+                    let _ = app.emit("core-ready", json!({ "ready": true }));
+                }
+                _ => {}
             }
         }
 
-        let Some(response) = response else {
-            return Err(last_err);
-        };
-
-        let status = response.status();
-        let text = response.text().await.unwrap_or_default();
-
-        if !status.is_success() {
-            let detail = serde_json::from_str::<Value>(&text)
-                .ok()
-                .and_then(|value| value.get("error").and_then(Value::as_str).map(str::to_string))
-                .unwrap_or(text);
-            return Err(format!("core-host 返回 {status}：{detail}"));
-        }
-
-        if text.trim().is_empty() {
-            return Ok(Value::Null);
-        }
-        serde_json::from_str(&text).or_else(|_| Ok(Value::String(text)))
-    }
-}
-
-/// 退出时同步地把系统代理关掉。
-///
-/// 不能用 reqwest：这个回调是同步的，而 `block_on` 在 Tauri 的运行时里会 panic。
-/// 所以手写一个最小 HTTP/1.1 POST —— 只需要知道有没有 200。
-fn restore_system_proxy(core: &CoreClient) {
-    use std::io::{Read, Write};
-    use std::net::{SocketAddr, TcpStream};
-
-    let Some(token) = core.token() else {
-        return;
-    };
-
-    let host_port = core
-        .base_url
-        .trim_start_matches("http://")
-        .split('/')
-        .next()
-        .unwrap_or_default()
-        .to_string();
-    let Ok(socket) = host_port.parse::<SocketAddr>() else {
-        return;
-    };
-    let Ok(mut stream) = TcpStream::connect_timeout(&socket, Duration::from_millis(500)) else {
-        return;
-    };
-
-    let body = r#"{"api":"proxy.close","param":null}"#;
-    let request = format!(
-        "POST /invoke HTTP/1.1\r\nHost: {host_port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    );
-
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
-    if stream.write_all(request.as_bytes()).is_err() {
-        return;
-    }
-
-    let mut response = String::new();
-    let _ = stream.read_to_string(&mut response);
-    if response.starts_with("HTTP/1.1 200") {
-        tracing::info!("退出前已还原系统代理");
-    } else {
-        tracing::warn!(
-            head = %response.lines().next().unwrap_or_default(),
-            "退出前还原系统代理失败"
-        );
-    }
-}
-
-fn read_token_file() -> Option<String> {
-    let candidates = [
-        std::env::var("DS_DATA_DIR").ok().map(|dir| format!("{dir}/run/core.token")),
-        std::env::var("PROGRAMDATA").ok().map(|dir| format!("{dir}/dev-sidecar-lite/run/core.token")),
-        std::env::var("USERPROFILE").ok().map(|dir| format!("{dir}/.dev-sidecar-lite/run/core.token")),
-    ];
-
-    for path in candidates.into_iter().flatten() {
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            let token = text.trim();
-            if !token.is_empty() {
-                return Some(token.to_string());
+        core.alive.store(false, Ordering::SeqCst);
+        // 管道断了：把还在等的请求全部失败掉，不让前端永远转圈
+        let waiting: Vec<u64> = core.pending.lock().unwrap().keys().copied().collect();
+        for id in waiting {
+            if let Some(sender) = core.pending.lock().unwrap().remove(&id) {
+                let _ = sender.send(Err("控制面已退出".to_string()));
             }
         }
-    }
-    None
+        warn!("控制面管道已关闭");
+    });
 }
 
 #[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CoreInfo {
     ready: bool,
-    base_url: String,
     version: Option<String>,
+    pid: Option<u64>,
+    engine: Option<String>,
     error: Option<String>,
 }
 
 struct AppState {
-    core: CoreClient,
-    stream: AsyncMutex<Option<tokio::task::JoinHandle<()>>>,
+    core: CoreRpc,
     core_proc: core_proc::CoreProcess,
 }
 
 impl Default for AppState {
     fn default() -> Self {
         Self {
-            core: CoreClient::new(),
-            stream: AsyncMutex::new(None),
+            core: CoreRpc::new(),
             core_proc: core_proc::CoreProcess::new(),
         }
     }
@@ -227,21 +268,27 @@ async fn api_invoke(
 
 #[tauri::command]
 async fn core_info(state: State<'_, AppState>) -> Result<CoreInfo, String> {
-    let base_url = state.core.base_url.clone();
-    match state.core.call("status.get", None).await {
-        Ok(_) => Ok(CoreInfo {
-            ready: true,
-            base_url,
-            version: None,
-            error: None,
-        }),
-        Err(err) => Ok(CoreInfo {
-            ready: false,
-            base_url,
-            version: None,
-            error: Some(err),
-        }),
-    }
+    let ready_info = state.core.ready_info();
+    let ready = state.core.alive.load(Ordering::SeqCst) && ready_info.is_some();
+    Ok(CoreInfo {
+        ready,
+        version: ready_info
+            .as_ref()
+            .and_then(|value| value.get("version").and_then(Value::as_str))
+            .map(str::to_string),
+        pid: ready_info
+            .as_ref()
+            .and_then(|value| value.get("pid").and_then(Value::as_u64)),
+        engine: ready_info
+            .as_ref()
+            .and_then(|value| value.get("engine").and_then(Value::as_str))
+            .map(str::to_string),
+        error: if ready {
+            None
+        } else {
+            Some("控制面尚未就绪".to_string())
+        },
+    })
 }
 
 #[tauri::command]
@@ -250,86 +297,9 @@ async fn legacy_check() -> Result<legacy::LegacyInfo, String> {
     Ok(legacy::detect())
 }
 
+/// 保留命令名：事件流自 v0.3.0 起由 `spawn_reader` 常驻转发，不再需要订阅动作。
 #[tauri::command]
-async fn start_status_stream(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    let mut guard = state.stream.lock().await;
-    if guard.as_ref().map(|handle| !handle.is_finished()).unwrap_or(false) {
-        return Ok(());
-    }
-
-    let core = state.core.clone();
-    let handle = tokio::spawn(async move {
-        let url = format!("{}/events", core.base_url.trim_end_matches('/'));
-        loop {
-            match stream_events(&app, &core, &url).await {
-                Ok(()) => tracing::info!("SSE 正常结束，3 秒后重连"),
-                Err(err) => tracing::warn!(error = %err, "SSE 断开，3 秒后重连"),
-            }
-            tokio::time::sleep(Duration::from_secs(3)).await;
-        }
-    });
-
-    *guard = Some(handle);
-    Ok(())
-}
-
-async fn stream_events(app: &AppHandle, core: &CoreClient, url: &str) -> Result<(), String> {
-    use futures_util::StreamExt;
-
-    let mut request = core.http.get(url);
-    if let Some(token) = core.token() {
-        request = request.bearer_auth(token);
-    }
-
-    let response = request.send().await.map_err(|err| err.to_string())?;
-    if !response.status().is_success() {
-        return Err(format!("SSE 返回 {}", response.status()));
-    }
-
-    let mut stream = response.bytes_stream();
-    let mut buffer = String::new();
-
-    while let Some(chunk) = stream.next().await {
-        let bytes = chunk.map_err(|err| err.to_string())?;
-        buffer.push_str(&String::from_utf8_lossy(&bytes));
-
-        while let Some(idx) = buffer.find("\n\n") {
-            let frame: String = buffer.drain(..idx + 2).collect();
-            let mut event_name = "message".to_string();
-            let mut data = String::new();
-
-            for line in frame.lines() {
-                if let Some(rest) = line.strip_prefix("event:") {
-                    event_name = rest.trim().to_string();
-                } else if let Some(rest) = line.strip_prefix("data:") {
-                    if !data.is_empty() {
-                        data.push('\n');
-                    }
-                    data.push_str(rest.trim_start());
-                }
-            }
-
-            if data.is_empty() {
-                continue;
-            }
-
-            let payload: Value = serde_json::from_str(&data).unwrap_or(Value::String(data));
-
-            // 事件名不能原样当 Tauri 事件名：Tauri 只接受字母数字与 `-`/`/`/`:`/`_`，
-            // 像 `config.changed` 这种带点号的名字会被静默丢弃（前端就永远收不到）。
-            // 所以额外发一条 `core-event`，把 {channel, payload} 原封不动交给前端自己分发。
-            let _ = app.emit(
-                "core-event",
-                json!({ "channel": event_name, "payload": payload.clone() }),
-            );
-
-            // 保留原来的窄通道，兼容早期前端（status/speed/traffic/log 都是合法事件名）
-            if matches!(event_name.as_str(), "status" | "speed" | "traffic" | "log") {
-                let _ = app.emit(&event_name, payload);
-            }
-        }
-    }
-
+async fn start_status_stream() -> Result<(), String> {
     Ok(())
 }
 
@@ -466,8 +436,19 @@ pub fn run() {
                 });
             }
 
-            // 界面所有按钮都走 core，必须先把它拉起来
-            app.state::<AppState>().core_proc.start();
+            // 界面所有按钮都走 core，必须先把它拉起来，并把管道两端接上
+            {
+                let state = app.state::<AppState>();
+                match state.core_proc.start() {
+                    Some(stdio) => {
+                        state.core.attach(stdio.stdin);
+                        spawn_reader(handle.clone(), state.core.clone(), stdio.stdout);
+                    }
+                    None => {
+                        tracing::warn!("控制面未能启动：界面所有操作都会失败（见 core-host.log）");
+                    }
+                }
+            }
 
             Ok(())
         })
@@ -478,7 +459,7 @@ pub fn run() {
                 // 退出前把系统代理还原：否则注册表里留着 ProxyEnable=1 + 127.0.0.1:31181，
                 // 而数据面已经没了 —— 用户下次开机直接没网，还会以为是软件坏了。
                 let state = handle.state::<AppState>();
-                restore_system_proxy(&state.core);
+                state.core.close_proxy_blocking();
                 state.core_proc.stop();
             }
         });

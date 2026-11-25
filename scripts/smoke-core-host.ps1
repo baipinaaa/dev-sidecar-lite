@@ -1,23 +1,24 @@
 #!/usr/bin/env pwsh
 <#
 .SYNOPSIS
-    冒烟测试控制面：用 `node core-host/src/main.js` 起，验证控制面 + 数据面都通。
+    冒烟测试控制面：以 stdio JSON-RPC 拉起 `core-host/main.js`，验证控制面 + 数据面都通。
 
 .DESCRIPTION
     为什么需要这个脚本：core（`@blue-frontier/dev-sidecar`）与 mitmproxy 都是运行时才
     `require` 的，如果打包时忘了放 core-bundle，安装包能装上、进程也能启动，
     但一进去就 MODULE_NOT_FOUND。
 
-    这里用仓库里组装好的 core-bundle（默认 `app/src-tauri/core-bundle`），
-    通过 `DS_CORE_BUNDLE` 指给 main.js，不设 `DS_CORE_PATH` / `DS_EXTRA_PATH`。
+    v0.3.0 起控制面走 stdio JSON-RPC，所以探针逻辑在 `scripts/rpc-probe.mjs` 里
+    （起进程 → 写帧读帧 → 断言），这个脚本只负责准备隔离环境与路径。
 
     断言链（缺一不可）：
-      1. `/healthz` 起来
-      2. `getApiList` 有内容（前端靠它判断接口是否存在）
-      3. `server.start` 返回端口，且 `HEAD /pac.js` 返回 200（数据面真的在跑）
-      4. `server.close` 后端口释放
+      1. `ready` 帧到达（控制面真的起来了）
+      2. `getApiList` 覆盖界面依赖的接口
+      3. `config.save` + `server.start` 返回端口，数据面端口真正监听
+      4. `HEAD /pac.js` 返回 200（PAC 端点可用）
+      5. `server.close` 后端口释放、`shutdown` 让控制面自行退出
 
-    用隔离的 `USERPROFILE`，绝不碰用户真实的 `~/.dev-sidecar-lite`。
+    用隔离的 `USERPROFILE` 与 `DS_DATA_DIR`，绝不碰用户真实的 `~/.dev-sidecar-lite`。
 
 .EXAMPLE
     pwsh -File scripts/smoke-core-host.ps1
@@ -49,176 +50,78 @@ function Resolve-Path2 {
     return (Join-Path $root $Path)
 }
 
-$bundlePath = Resolve-Path2 $CoreBundle
-$entryPath = Resolve-Path2 $NodeEntry
-if (-not (Test-Path $entryPath)) {
-    Write-Host "[FAIL] 找不到 Node 入口：$entryPath" -ForegroundColor Red
-    exit 1
+$entry = Resolve-Path2 $NodeEntry
+if (-not (Test-Path -LiteralPath $entry)) {
+    throw "找不到控制面入口: $entry"
 }
 
-$coreDir = Join-Path $bundlePath 'node_modules/@blue-frontier/dev-sidecar'
-if (-not (Test-Path $coreDir)) {
-    Write-Host "[FAIL] 找不到 core：$coreDir" -ForegroundColor Red
-    Write-Host '       先跑 node scripts/prepare-core-bundle.mjs --dev-sidecar <dev-sidecar 仓库>' -ForegroundColor Yellow
-    exit 1
-}
-$mitmproxyDir = Join-Path $bundlePath 'node_modules/@blue-frontier/mitmproxy'
-if (-not (Test-Path $mitmproxyDir)) {
-    Write-Host "[FAIL] 找不到 mitmproxy：$mitmproxyDir" -ForegroundColor Red
-    exit 1
-}
-$extraDir = Join-Path $bundlePath 'extra'
-if (-not (Test-Path (Join-Path $extraDir 'sysproxy.exe'))) {
-    Write-Host "[FAIL] core-bundle/extra 里没有 sysproxy.exe：$extraDir" -ForegroundColor Red
-    Write-Host '       没有它，core 的 extra-path 判定失败，系统代理/PAC 全部不可用' -ForegroundColor Yellow
-    exit 1
+$bundle = Resolve-Path2 $CoreBundle
+if (Test-Path -LiteralPath $bundle) {
+    # 让 main.js 直接从这个 bundle 找 core / extra
+    $env:DS_CORE_BUNDLE = $bundle
+} else {
+    Write-Host "[提示] 没有 $bundle，将按源码布局解析 core（需要先 pnpm install）" -ForegroundColor Yellow
 }
 
-# 中间产物一律留在项目内 .build/（不要写 C 盘临时目录）
-$buildRoot = Join-Path $root '.build'
-New-Item -ItemType Directory -Force -Path $buildRoot | Out-Null
-$work = Join-Path $buildRoot ('smoke-' + [Guid]::NewGuid().ToString('N').Substring(0, 8))
-$dataDir = Join-Path $work 'data'
-$homeDir = Join-Path $work 'home'
-New-Item -ItemType Directory -Force -Path $work, $dataDir, (Join-Path $homeDir '.dev-sidecar-lite') | Out-Null
+# 优先用 bundle 里随包的 node，保证与安装包运行时一致
+$nodeExe = $null
+$bundledNode = Join-Path $bundle 'node/node.exe'
+if (Test-Path -LiteralPath $bundledNode) {
+    $nodeExe = $bundledNode
+} else {
+    $command = Get-Command node -ErrorAction SilentlyContinue
+    if ($command) {
+        $nodeExe = $command.Source
+    }
+}
+if (-not $nodeExe) {
+    throw '找不到 node（既没有 core-bundle/node/node.exe，PATH 里也没有）'
+}
 
-# 隔离用户配置：core 的 getUserBasePath() 只认 USERPROFILE/HOME
+$probe = Join-Path $root 'scripts/rpc-probe.mjs'
+if (-not (Test-Path -LiteralPath $probe)) {
+    throw "找不到探针脚本: $probe"
+}
+
+$workDir = Join-Path $root '.build'
+New-Item -ItemType Directory -Force -Path $workDir | Out-Null
+$homeDir = Join-Path $workDir ("smoke-home-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+$dataDir = Join-Path $workDir ("smoke-data-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+New-Item -ItemType Directory -Force -Path $homeDir | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $homeDir '.dev-sidecar-lite') | Out-Null
+New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
+
+# 用配置把代理端口固定到探针端口，避免撞用户正在使用的 31181
 $configFile = Join-Path $homeDir '.dev-sidecar-lite/config.json'
 @{
-    server            = @{ port = $ProxyPort; enabled = $false; startup = $false }
-    proxy             = @{ enabled = $false; pacEnabled = $false }
-    app               = @{ autoStart = @{ enabled = $false } }
-} | ConvertTo-Json -Depth 6 | Set-Content -Path $configFile -Encoding utf8NoBOM
+    server = @{ port = $ProxyPort; startup = $false }
+    proxy  = @{ enabled = $false; pacEnabled = $false; useMapping = $false; enableLoopback = $false }
+} | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $configFile -Encoding utf8
 
-# 入口在仓库里，core-bundle 也用仓库里组装好的那份（安装形态才靠相对路径自动发现）
-$env:DS_CORE_BUNDLE = $bundlePath
+Write-Host "[smoke] node   : $nodeExe"
+Write-Host "[smoke] entry  : $entry"
+Write-Host "[smoke] bundle : $(if (Test-Path -LiteralPath $bundle) { $bundle } else { '(源码布局)' })"
+Write-Host "[smoke] home   : $homeDir"
+Write-Host "[smoke] 代理端口: $ProxyPort"
 
-Write-Host "工作目录: $work"
-
-$stdout = Join-Path $work 'stdout.log'
-$stderr = Join-Path $work 'stderr.log'
-
-$env:USERPROFILE = $homeDir
-$env:HOME = $homeDir
-$env:DS_DATA_DIR = $dataDir
-
-# 优先用 core-bundle 里随包的 node 运行时（与安装形态一致），没有就用 PATH 里的 node
-$nodeExe = Join-Path $bundlePath 'node/node.exe'
-if (-not (Test-Path $nodeExe)) {
-    $nodeExe = (Get-Command node -ErrorAction Stop).Source
-}
-$proc = Start-Process -FilePath $nodeExe `
-    -ArgumentList $entryPath, '--port', $Port, '--no-startup' `
-    -RedirectStandardOutput $stdout -RedirectStandardError $stderr `
-    -PassThru -WindowStyle Hidden
-
-$ok = $false
-$detail = ''
-$base = "http://127.0.0.1:$Port"
-
+$exit = 1
 try {
-    $health = $null
-    for ($i = 0; $i -lt ($TimeoutSeconds * 2); $i++) {
-        if ($proc.HasExited) { break }
-        try {
-            $health = Invoke-RestMethod -Uri "$base/healthz" -TimeoutSec 2
-            if ($health) { break }
-        } catch {
-            # 还没起来
-        }
-        Start-Sleep -Milliseconds 500
-    }
-
-    if ($proc.HasExited) {
-        $detail = "进程已退出（exit=$($proc.ExitCode)）"
-    } elseif (-not $health) {
-        $detail = "健康检查超时（${TimeoutSeconds}s）"
-    } else {
-        $tokenFile = Join-Path $dataDir 'run/core.token'
-        if (-not (Test-Path $tokenFile)) {
-            $detail = "没有生成 token：$tokenFile"
-        } else {
-            $token = (Get-Content $tokenFile -Raw).Trim()
-            $headers = @{ Authorization = "Bearer $token" }
-            $invoke = {
-                param([string]$api, $param = $null)
-                $body = @{ api = $api; param = $param } | ConvertTo-Json -Compress -Depth 12
-                Invoke-RestMethod -Uri "$base/invoke" -Method Post -Headers $headers `
-                    -ContentType 'application/json' -Body $body -TimeoutSec 60
-            }
-
-            $apiList = & $invoke 'getApiList'
-            # getApiList 返回扁平接口名数组（"server.start"、"setting.load" …），
-            # 前端用它做「接口存在性」校验；缺哪个前缀，对应页面整块功能都会失效。
-            $apiNames = @()
-            if ($apiList) { $apiNames = @($apiList) }
-            $required = @('server.start', 'server.close', 'proxy.start', 'config.get',
-                'config.save', 'setting.load', 'setting.save', 'serviceGroups.list',
-                'info.get', 'shell.openPath', 'getApiList')
-            $missing = @($required | Where-Object { $apiNames -notcontains $_ })
-
-            if ($missing.Count -gt 0) {
-                $detail = "getApiList 缺少接口：$($missing -join ', ')（共 $($apiNames.Count) 项）"
-            } else {
-                $started = & $invoke 'server.start'
-                if (-not $started -or -not $started.port) {
-                    $detail = "server.start 没有返回端口：$($started | ConvertTo-Json -Compress -Depth 3)"
-                } else {
-                    # 数据面必须真的应答 /pac.js（core 的 start 不校验子进程是否起来）
-                    $pac = $null
-                    for ($i = 0; $i -lt 60; $i++) {
-                        try {
-                            $pac = Invoke-WebRequest -Uri "http://127.0.0.1:$($started.port)/pac.js" `
-                                -Method Head -TimeoutSec 3 -NoProxy
-                            if ($pac.StatusCode -eq 200) { break }
-                        } catch {
-                            $pac = $null
-                        }
-                        Start-Sleep -Milliseconds 500
-                    }
-
-                    if (-not $pac -or $pac.StatusCode -ne 200) {
-                        $detail = "数据面启动了但 /pac.js 不可用（端口 $($started.port)）"
-                    } else {
-                        & $invoke 'server.close' | Out-Null
-                        Start-Sleep -Seconds 2
-                        $listening = Get-NetTCPConnection -LocalPort $started.port -State Listen -ErrorAction SilentlyContinue
-                        if ($listening) {
-                            $detail = "server.close 之后端口 $($started.port) 仍在监听"
-                        } else {
-                            $ok = $true
-                            $detail = "healthz→getApiList($($apiNames.Count) 项)→server.start→/pac.js 200→server.close，全链路通过"
-                        }
-                    }
-                }
-            }
-        }
-    }
-} catch {
-    $detail = "请求失败：$($_.Exception.Message)"
+    & $nodeExe $probe --node $nodeExe --entry $entry --data-dir $dataDir --home $homeDir --port $ProxyPort --timeout ($TimeoutSeconds * 1000)
+    $exit = $LASTEXITCODE
 } finally {
-    if ($proc -and -not $proc.HasExited) {
-        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Milliseconds 300
+    # 控制面子进程应当已自行退出；万一残留，按端口兜底清理
+    try {
+        Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.CommandLine -and $_.CommandLine -like "*$entry*" } |
+            ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    } catch {
+        # 忽略
     }
-    # 数据面子进程是 fork 出来的，杀掉父进程不一定会带走它
-    Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -like "*$work*" } |
-        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    Remove-Item -LiteralPath $homeDir, $dataDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-Write-Host ''
-Write-Host '--- core-host stdout （末尾 30 行）---'
-if (Test-Path $stdout) { Get-Content $stdout -Tail 30 }
-Write-Host '--- core-host stderr （末尾 30 行）---'
-if (Test-Path $stderr) { Get-Content $stderr -Tail 30 }
-
-if ($ok) {
-    Write-Host "[PASS] $detail" -ForegroundColor Green
-    Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
-    exit 0
+if ($exit -ne 0) {
+    throw "控制面冒烟失败（退出码 $exit）"
 }
 
-Write-Host "[FAIL] $detail" -ForegroundColor Red
-Write-Host "工作目录保留供排查：$work" -ForegroundColor Yellow
-exit 1
+Write-Host '[smoke] 控制面与数据面冒烟全部通过' -ForegroundColor Green

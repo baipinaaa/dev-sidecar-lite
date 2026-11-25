@@ -118,7 +118,7 @@ jobs:
           "path=$($found[0].FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       # 装一遍再发：0.1.0 就是「编译全绿、装完空壳」，光看产物存在说明不了任何问题
-      - name: 安装冒烟（装包 → 布局 → healthz → getApiList → /pac.js → 卸载）
+      - name: 安装冒烟（装包 → 布局 → stdio 冒烟：ready/getApiList → /pac.js → 卸载）
         shell: pwsh
         run: |
           [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
